@@ -51,11 +51,11 @@ await wallet.close();           // saves, seals, wipes the plaintext
 | `SwarmWallet.openOrCreate(options)` | Opens the wallet in `dataDir`, creating one if there is none. Creation needs the network: the addon derives the birthday from the chain tip. |
 | `SwarmWallet.restoreFromSeed(options)` | Restores a BIP-39 phrase. Refuses if a wallet already exists in `dataDir`. |
 | `wallet.balance()` / `balanceText()` | `bigint` zatoshi, total and spendable apart; or one formatted string. |
-| `wallet.addresses()` / `newAddress(receivers?)` | Unified and transparent lists; a new unified address (all three receivers by default). |
-| `wallet.proposeSend(request)` → `SendQuote` | Builds the proposal and returns its fee. **Transmits nothing.** `quote.confirm()` transmits. |
+| `wallet.addresses()` / `newAddress(receivers?)` | Unified and transparent lists; a new unified address (orchard **and** sapling by default — the addon's `generate_unified_address` takes no transparent flag). |
+| `wallet.proposeSend(request)` → `SendQuote` | Builds the proposal and returns its fee. **Transmits nothing.** `quote.confirm()` transmits, and refuses if a later proposal has replaced it. |
 | `wallet.send({…, maxFeeZat})` | Propose and confirm in one call, refusing above a fee ceiling. |
 | `wallet.sync({signal?})` + `status` / `synced` / `sync-error` events | One run to the chain tip, polling the addon as it goes. |
-| `wallet.transactions()` | Value transfers, signed: negative when value left the wallet. |
+| `wallet.transactions()` | Value transfers: a magnitude plus `direction: "in" \| "out" \| "unknown"`. Never a guessed sign. |
 | `wallet.parseAddress(address)` | Verdict plus `decodedBy: "addon" \| "prefix"` — read the note below. |
 | `wallet.seedPhrase()` | The seed, only when asked for by name. Nothing else in this package reads it. |
 | `wallet.close()` | Saves, drops the addon's wallet, seals the file, wipes the plaintext. Idempotent. |
@@ -63,7 +63,7 @@ await wallet.close();           // saves, seals, wipes the plaintext
 
 Amounts are `bigint` zatoshi throughout. 100,000,000 zatoshi = 1 SWM.
 
-## Three things to know before building on it
+## Four things to know before building on it
 
 **One wallet per process.** The addon keeps a single global `LightClient`
 (`native/src/lib.rs`, `static LIGHTCLIENT: RwLock<Option<LightClient>>`). There is
@@ -85,6 +85,13 @@ supply the genesis a `SwarmMainnet` chain type needs — so it answers
 own HRP and version-byte check (`src/addressCheck.ts`, ported from the wallet) and
 reports `decodedBy: "prefix"` when that is the strongest answer available. It is
 a real limitation, stated rather than papered over.
+
+**The server's genesis cannot be checked.** `info_server` builds its JSON by hand
+from zingolib's `ServerInfo` and carries no genesis hash, so `ServerInfo.genesisVerified`
+is **always false** and "same chain name, different chain" is a risk this package
+cannot currently rule out. The chain label IS checked, and a mismatch refuses the
+open. Closing the rest needs a new addon entry point; it is an open question in
+the integration doc, not a silent hole.
 
 ## Wallet file protection
 
@@ -144,6 +151,9 @@ of the wallet file it was copied from. CI runs it before anything compiles.
   IPC surface, where the wallet directory lives, `safeStorage` key handling, the
   wallet pane, and the proposed in-chat payment message and address exchange.
   It says, per section, what is proposed and what is implemented.
+* [`docs/ADDON-BEHAVIOUR.md`](docs/ADDON-BEHAVIOUR.md) — what each addon entry
+  point really answers, read out of `native/src/lib.rs`, including the seven that
+  answer prose rather than JSON. Read it before adding a call.
 * [`docs/CI-PROOF-2026-09-26.md`](docs/CI-PROOF-2026-09-26.md) — the CI runs, the
   `native.node` hashes, and what each run proved.
 

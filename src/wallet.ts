@@ -17,7 +17,7 @@ import { EventEmitter } from "node:events";
 
 import { formatSwm, zatoshiFromJson } from "./amounts.js";
 import { checkAddressForProfile } from "./addressCheck.js";
-import { SwarmWalletError, callAddon, parseAddonJson } from "./errors.js";
+import { SwarmWalletError, callAddon, callAddonText, parseAddonJson } from "./errors.js";
 import { nativeChainHint, swarmProfileFor } from "./networkProfiles.js";
 import type { SwarmNetworkProfile } from "./networkProfiles.js";
 import type { NativeAddon } from "./nativeAddon.js";
@@ -91,6 +91,27 @@ export type SwarmWalletEvents = {
 /** How long between `status_sync` polls while a sync runs. */
 const SYNC_POLL_MS = 1_500;
 
+/** How many "sync task has not been launched" answers to tolerate before giving up. */
+const MAX_UNLAUNCHED_POLLS = 10;
+
+/**
+ * The directory each loaded addon was given, if this package gave it one.
+ *
+ * `set_wallet_base_dir` is a `OnceCell`: the first caller wins for the life of
+ * the process, and it answers `false` for **every** later call, including one
+ * passing the identical path. There is no getter and no reset. So a `false` on
+ * its own cannot tell "you already set this, to the same place" from "somebody
+ * else set it somewhere else", and treating `false` as fatal made
+ * close-then-reopen impossible — the ordinary messenger flow after an error, an
+ * account switch, or the wrong-chain refusal below.
+ *
+ * Keyed by the addon object rather than held in a module variable, because the
+ * cell belongs to the addon: one loaded `native.node` is one cell. A test with
+ * two fake addons has two, which is exactly right, and nothing here leaks when an
+ * addon is dropped.
+ */
+const baseDirGivenToAddon = new WeakMap<NativeAddon, string>();
+
 export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
   /**
    * The addon is a process singleton, so this is too. Module-level and not
@@ -115,6 +136,18 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
   #closed = false;
 
   #syncing = false;
+
+  /**
+   * Which proposal the addon is holding.
+   *
+   * The addon stores exactly ONE proposal: `send` builds it, `confirm` transmits
+   * whatever is stored at that moment. So two quotes in flight is not two
+   * payments — it is one payment, the newest, and an older quote's `confirm()`
+   * would transmit it while reporting the older quote's fee. Quote A for 1 000
+   * zatoshi to Alice, then quote B for 999 000 to Bob, then `a.confirm()`: Bob
+   * gets 999 000. Each quote captures this number and refuses if it has moved.
+   */
+  #proposalSerial = 0;
 
   private constructor(options: {
     addon: NativeAddon;
@@ -167,11 +200,15 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
         );
         await wallet.#persist();
       }
+      // Inside the try: #afterInit makes a network call, so an unreachable or
+      // slow indexer is the ordinary case, and its failure used to leave the
+      // decrypted wallet file on disk and the process singleton wedged with no
+      // object for the caller to close.
+      await wallet.#afterInit(options);
     } catch (error) {
       await wallet.#abandon();
       throw error;
     }
-    await wallet.#afterInit(options);
     return wallet;
   }
 
@@ -206,11 +243,11 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
         ),
       );
       await wallet.#persist();
+      await wallet.#afterInit(options);
     } catch (error) {
       await wallet.#abandon();
       throw error;
     }
-    await wallet.#afterInit(options);
     return wallet;
   }
 
@@ -239,54 +276,65 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
       "get_spendable_balance_total",
       () => this.#addon.get_spendable_balance_total(),
     );
-    const recognised = (source: Record<string, unknown>, call: string, names: string[]): void => {
-      if (names.some((name) => source[name] !== undefined && source[name] !== null)) return;
+    // A field this version does not know must be an error, never a zero. The
+    // earlier version checked that SOME field was recognised and then let each
+    // individual pool fall back to 0n — so renaming one pool would have reported a
+    // funded wallet as short by exactly that pool, successfully, with no
+    // complaint. `find` returns undefined and the callers decide.
+    const find = (source: Record<string, unknown>, names: string[]): bigint | undefined => {
+      for (const name of names) {
+        const value = source[name];
+        if (value !== undefined && value !== null) return zatoshiFromJson(value, name);
+      }
+      return undefined;
+    };
+    const refuse = (call: string, source: Record<string, unknown>, missing: string): never => {
       throw new SwarmWalletError(
         "malformed-response",
-        `${call} answered an object this version does not recognise — keys: ` +
-          `[${Object.keys(source).join(", ")}]. Expected at least one of ` +
-          `[${names.join(", ")}]. Refusing rather than reporting a zero balance for a wallet ` +
-          `that may hold funds.`,
+        `${call} answered an object this version cannot read: no ${missing}. Keys present: ` +
+          `[${Object.keys(source).join(", ")}]. Refusing, because the alternative is reporting a ` +
+          `balance that is wrong rather than one that is unknown.`,
         { call },
       );
     };
-    recognised(raw, "get_balance", [
-      "orchard_balance",
-      "orchard",
-      "orchard_value",
-      "sapling_balance",
-      "sapling",
-      "sapling_value",
-      "transparent_balance",
-      "transparent",
-      "transparent_value",
-      "total",
-    ]);
-    recognised(spendable, "get_spendable_balance_total", [
-      "spendable_balance",
-      "spendable",
-      "total",
-    ]);
-    const pick = (source: Record<string, unknown>, ...names: string[]): bigint => {
-      for (const name of names) {
-        if (source[name] !== undefined && source[name] !== null) {
-          return zatoshiFromJson(source[name], name);
-        }
-      }
-      return 0n;
-    };
-    const orchard = pick(raw, "orchard_balance", "orchard", "orchard_value");
-    const sapling = pick(raw, "sapling_balance", "sapling", "sapling_value");
-    const transparent = pick(raw, "transparent_balance", "transparent", "transparent_value");
-    const total = raw["total"] !== undefined ? pick(raw, "total") : orchard + sapling + transparent;
-    const spendableZat = pick(spendable, "spendable_balance", "spendable", "total");
+
+    const orchard = find(raw, ["orchard_balance", "orchard", "orchard_value"]);
+    const sapling = find(raw, ["sapling_balance", "sapling", "sapling_value"]);
+    const transparent = find(raw, ["transparent_balance", "transparent", "transparent_value"]);
+    const statedTotal = find(raw, ["total", "total_balance"]);
+
+    // Either the addon states a total, or all three pools are readable so one can
+    // be computed. Two of three is not enough for either.
+    if (
+      statedTotal === undefined &&
+      (orchard === undefined || sapling === undefined || transparent === undefined)
+    ) {
+      const absent = [
+        orchard === undefined ? "orchard" : null,
+        sapling === undefined ? "sapling" : null,
+        transparent === undefined ? "transparent" : null,
+      ]
+        .filter((name): name is string => name !== null)
+        .join(", ");
+      refuse("get_balance", raw, `total, and no readable ${absent} balance`);
+    }
+    const spendable_ = find(spendable, ["spendable_balance", "spendable", "total"]);
+    if (spendable_ === undefined) {
+      refuse("get_spendable_balance_total", spendable, "spendable balance");
+    }
+    const spendableZat = spendable_ as bigint;
+
+    const totalZat =
+      statedTotal ?? (orchard as bigint) + (sapling as bigint) + (transparent as bigint);
     return {
-      totalZat: total,
+      totalZat,
       spendableZat,
-      orchardZat: orchard,
-      saplingZat: sapling,
-      transparentZat: transparent,
-      pendingZat: total > spendableZat ? total - spendableZat : 0n,
+      // `null` where the addon did not say, rather than a zero that reads as a
+      // fact. A pane that shows a pool split has to handle null.
+      orchardZat: orchard ?? null,
+      saplingZat: sapling ?? null,
+      transparentZat: transparent ?? null,
+      pendingZat: totalZat > spendableZat ? totalZat - spendableZat : 0n,
       raw,
     };
   }
@@ -313,30 +361,59 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
   }
 
   /**
-   * Creates a new unified address and returns it.
+   * Adds a unified address to the account and returns it.
    *
-   * Defaults to orchard + sapling + transparent, which is what a unified address
-   * is for: the sender picks the best pool it supports. Pass a narrower
-   * selection when a recipient is known to be shielded-only.
+   * Defaults to orchard **and** sapling, so a sender picks whichever pool it
+   * supports. There is no `transparent` flag: the addon's
+   * `generate_unified_address` takes a `ReceiverSelection { orchard, sapling }`
+   * and nothing else.
+   *
+   * The selection crosses as a **flag string**, not JSON, because the addon reads
+   * `receivers.contains('o')` and `receivers.contains('z')`. Sending
+   * `JSON.stringify({orchard: false, sapling: true})` would ask for orchard only,
+   * since that text contains an `o` and no `z` — which is exactly what this
+   * package did until the addon source was read properly.
    */
   async newAddress(receivers: ReceiverSelection = {}): Promise<string> {
     this.#assertOpen();
-    const { orchard = true, sapling = true, transparent = true } = receivers;
-    const selection = JSON.stringify({ orchard, sapling, transparent });
-    const answer = await callAddon<unknown>("create_new_unified_address", () =>
+    const { orchard = true, sapling = true } = receivers;
+    if (!orchard && !sapling) {
+      throw new SwarmWalletError(
+        "bad-argument",
+        "a unified address needs at least one shielded receiver: orchard, sapling, or both.",
+      );
+    }
+    const selection = `${orchard ? "o" : ""}${sapling ? "z" : ""}`;
+    const answer = await callAddon<Record<string, unknown>>("create_new_unified_address", () =>
       this.#addon.create_new_unified_address(selection),
     );
-    const created = addressStrings(answer);
-    const last = created.at(-1);
-    if (last === undefined) {
+    const created = stringOrNull(answer["encoded_address"]);
+    if (created === null) {
       throw new SwarmWalletError(
         "malformed-response",
-        `create_new_unified_address answered ${JSON.stringify(answer)}, which contains no address.`,
+        `create_new_unified_address answered ${JSON.stringify(answer)}, which carries no ` +
+          `encoded_address.`,
+        { call: "create_new_unified_address" },
+      );
+    }
+    // What was actually produced, not what was asked for: the flag string is a
+    // request and the addon's answer is the fact.
+    if (orchard && answer["has_orchard"] === false) {
+      throw new SwarmWalletError(
+        "malformed-response",
+        `an orchard receiver was asked for and ${created} has none.`,
+        { call: "create_new_unified_address" },
+      );
+    }
+    if (sapling && answer["has_sapling"] === false) {
+      throw new SwarmWalletError(
+        "malformed-response",
+        `a sapling receiver was asked for and ${created} has none.`,
         { call: "create_new_unified_address" },
       );
     }
     await this.#persist();
-    return last;
+    return created;
   }
 
   /** Every movement of value this wallet knows about, newest last. */
@@ -353,16 +430,35 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     return list.filter(isRecord).map(toTransaction);
   }
 
-  /** What the server says it is. */
+  /**
+   * What the server says it is.
+   *
+   * `genesisHash` is **always null through this addon**, and `genesisVerified` is
+   * therefore always false. `info_server` builds its JSON by hand from
+   * zingolib's `ServerInfo` and the fields it carries are `version`,
+   * `git_commit`, `server_uri`, `vendor`, `taddr_support`, `chain_name`,
+   * `sapling_activation_height`, `consensus_branch_id`, `latest_block_height` —
+   * no genesis. So "is this really SWARM mainnet and not another chain calling
+   * itself that" is answered by the chain label, the consensus branch id and the
+   * sapling activation height, and not by the hash the profile holds. Closing
+   * that gap needs a new addon entry point; it is an open question in
+   * docs/MESSENGER-INTEGRATION.md rather than a silent hole.
+   */
   async serverInfo(): Promise<ServerInfo> {
     this.#assertOpen();
     const raw = await callAddon<Record<string, unknown>>("info_server", () =>
       this.#addon.info_server(),
     );
+    const genesisHash = stringOrNull(raw["genesis_hash"] ?? raw["genesisHash"]);
     return {
       chainName: stringOr(raw["chain_name"] ?? raw["chainName"], ""),
-      genesisHash: stringOrNull(raw["genesis_hash"] ?? raw["genesisHash"]),
-      blockHeight: numberOrNull(raw["block_height"] ?? raw["blockHeight"] ?? raw["latest_block"]),
+      genesisHash,
+      genesisVerified: genesisHash !== null && genesisHash === this.profile?.genesis,
+      blockHeight: numberOrNull(
+        raw["latest_block_height"] ?? raw["block_height"] ?? raw["blockHeight"],
+      ),
+      consensusBranchId: stringOrNull(raw["consensus_branch_id"]),
+      saplingActivationHeight: numberOrNull(raw["sapling_activation_height"]),
       vendor: stringOrNull(raw["vendor"]),
       raw,
     };
@@ -416,6 +512,20 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     );
     const status = stringOr(raw["status"], "");
     if (status === "success") {
+      // The addon says which chain it decoded against, and for the three upstream
+      // Zcash labels there is no prefix pre-check in front of it — so without
+      // this a testnet address is `valid: true` on a `main` wallet and
+      // proposeSend goes ahead with it.
+      const decodedChain = stringOr(raw["chain_name"], "");
+      if (decodedChain && decodedChain !== this.chain) {
+        return {
+          valid: false,
+          reason:
+            `That address belongs to "${decodedChain}" and this wallet is on "${this.chain}". ` +
+            `The two are separate chains: coins sent across them are lost.`,
+          decodedBy: "addon",
+        };
+      }
       const kind = stringOr(raw["address_kind"], "unified");
       const receivers = Array.isArray(raw["receivers_available"])
         ? raw["receivers_available"].filter((value): value is string => typeof value === "string")
@@ -480,6 +590,8 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
       this.#addon.send(payload),
     );
     const feeZat = zatoshiFromJson(quoted["fee"], "fee");
+    this.#proposalSerial += 1;
+    const serial = this.#proposalSerial;
     let confirmed = false;
     return {
       feeZat,
@@ -490,6 +602,15 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
             "this quote has already been confirmed. Propose the payment again rather than " +
               "retrying a confirm: the addon holds one stored proposal, and a second confirm " +
               "would transmit whatever is in it now.",
+          );
+        }
+        if (serial !== this.#proposalSerial) {
+          throw new SwarmWalletError(
+            "bad-argument",
+            "this quote is stale: a later payment was proposed and replaced the one the addon " +
+              "is holding, so confirming this quote would transmit that other payment — a " +
+              "different recipient and a different amount, reported with this quote's fee. " +
+              "Propose again.",
           );
         }
         confirmed = true;
@@ -552,16 +673,17 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
       );
     }
     this.#syncing = true;
+    const unlaunched = { count: 0 };
     try {
-      await callAddon<unknown>("run_sync", () => this.#addon.run_sync());
+      await callAddonText("run_sync", () => this.#addon.run_sync());
       for (;;) {
         if (options.signal?.aborted) {
-          await callAddon<unknown>("stop_sync", () => this.#addon.stop_sync()).catch(() => {});
+          await callAddonText("stop_sync", () => this.#addon.stop_sync()).catch(() => {});
           throw new SwarmWalletError("bad-argument", "the sync was cancelled by its caller.");
         }
         const status = await this.syncStatus();
         this.emit("status", status);
-        const finished = await this.#pollSyncFinished();
+        const finished = await this.#pollSyncFinished(unlaunched);
         if (finished) {
           const final = await this.syncStatus();
           await this.#persist();
@@ -601,16 +723,16 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     return { syncing: this.#syncing, syncedHeight, chainHeight, progress, raw };
   }
 
-  /** Stops a running sync. Does not close the wallet. */
-  async stopSync(): Promise<void> {
+  /** Stops a running sync. Does not close the wallet. Answers the addon's prose. */
+  async stopSync(): Promise<string> {
     this.#assertOpen();
-    await callAddon<unknown>("stop_sync", () => this.#addon.stop_sync());
+    return callAddonText("stop_sync", () => this.#addon.stop_sync());
   }
 
   /** Rescans from the wallet's birthday. Slow, and sometimes the only cure. */
-  async rescan(): Promise<void> {
+  async rescan(): Promise<string> {
     this.#assertOpen();
-    await callAddon<unknown>("run_rescan", () => this.#addon.run_rescan());
+    return callAddonText("run_rescan", () => this.#addon.run_rescan());
   }
 
   // ── closing ──────────────────────────────────────────────────────────────
@@ -624,18 +746,32 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    let persistError: unknown = null;
     try {
-      await callAddon<unknown>("stop_sync", () => this.#addon.stop_sync()).catch(() => {});
+      await callAddonText("stop_sync", () => this.#addon.stop_sync()).catch(() => {});
       await this.#persist();
-    } finally {
-      try {
-        this.#addon.deinitialize();
-      } finally {
-        await this.store.close();
-        if (SwarmWallet.#openInstance === this) SwarmWallet.#openInstance = null;
-        this.removeAllListeners();
-      }
+    } catch (error) {
+      persistError = error;
     }
+    try {
+      this.#addon.deinitialize();
+    } catch {
+      // The addon is in whatever state it is in; the slot must still be freed.
+    }
+    let storeError: unknown = null;
+    try {
+      await this.store.close();
+    } catch (error) {
+      // A failed seal leaves the plaintext in place on purpose (it is the only
+      // copy) and throws. The wallet is finished either way, so the process slot
+      // is released here rather than in a `finally` after the throw — otherwise
+      // one failed seal wedged the singleton and no wallet could be opened again.
+      storeError = error;
+    }
+    if (SwarmWallet.#openInstance === this) SwarmWallet.#openInstance = null;
+    this.removeAllListeners();
+    if (storeError !== null) throw storeError;
+    if (persistError !== null) throw persistError;
   }
 
   // ── internals ────────────────────────────────────────────────────────────
@@ -679,6 +815,8 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     };
     const store = new WalletStore(storeOptions);
     const existed = await store.exists();
+    // `store.open()` zeroes its own key if it throws, so a wrong-key open leaves
+    // nothing behind. Nothing else here holds the key.
     await store.open();
 
     const wallet = new SwarmWallet({
@@ -690,19 +828,36 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
       minConfirmations,
     });
 
-    // The addon's base dir is a OnceCell: the first setter in the process wins.
-    // A `false` here means someone else already set it, which is a real problem
-    // and not a warning — the wallet file would be written somewhere other than
-    // where this store encrypts it.
-    const accepted = options.addon.set_wallet_base_dir(store.paths.baseDir);
-    if (!accepted) {
-      const note =
-        `the addon's wallet base directory was already set by an earlier caller in this process; ` +
-        `it is a OnceCell and cannot be changed. This wallet would be written outside ` +
-        `${store.paths.baseDir}, where its encryption at rest does not reach. Restart the process ` +
-        `with the directory you want, or open this wallet in its own process.`;
+    // The addon's base dir is a OnceCell, so this is only ever set ONCE per
+    // process — and a second call answers false even for the identical path.
+    // What matters is not the boolean but whether the directory the addon is
+    // actually using is the one this store encrypts in.
+    const alreadyGiven = baseDirGivenToAddon.get(options.addon);
+    if (alreadyGiven === undefined) {
+      const accepted = options.addon.set_wallet_base_dir(store.paths.baseDir);
+      if (!accepted) {
+        // Somebody else in this process got there first, and there is no getter
+        // to ask where they pointed it. The wallet file could be written outside
+        // the directory this store seals, so refuse.
+        await store.close({ seal: false });
+        throw new SwarmWalletError(
+          "bad-argument",
+          `the addon's wallet base directory was already set by something else in this process ` +
+            `(it is a OnceCell, with no getter and no reset), so this wallet might be written ` +
+            `outside ${store.paths.baseDir}, where its encryption at rest does not reach. Open ` +
+            `this wallet in its own process.`,
+        );
+      }
+      baseDirGivenToAddon.set(options.addon, store.paths.baseDir);
+    } else if (alreadyGiven !== store.paths.baseDir) {
       await store.close({ seal: false });
-      throw new SwarmWalletError("bad-argument", note);
+      throw new SwarmWalletError(
+        "bad-argument",
+        `this process already pointed the addon at ${alreadyGiven}, and the addon's wallet ` +
+          `base directory is a OnceCell that cannot be changed. A wallet under ` +
+          `${store.paths.baseDir} cannot be opened here — use a separate process for it. (One ` +
+          `messenger account per process; see docs/MESSENGER-INTEGRATION.md.)`,
+      );
     }
     options.addon.set_crypto_default_provider_to_ring();
     SwarmWallet.#openInstance = wallet;
@@ -731,32 +886,42 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     const info = await this.serverInfo();
     const expectedChain = this.profile?.chainLabel ?? this.chain;
     if (info.chainName && info.chainName !== expectedChain) {
-      const actual = info.chainName;
-      // The close is best-effort on purpose: whatever goes wrong shutting a
-      // wallet we are refusing anyway, the error the caller must see is the
-      // wrong chain, not a failed save on the way out.
-      await this.close().catch(() => {});
       throw new SwarmWalletError(
         "wrong-chain",
-        `${this.server} reports chain "${actual}", not "${expectedChain}". The wallet was closed ` +
-          `without syncing: scanning the wrong chain writes its state over the right one.`,
+        `${this.server} reports chain "${info.chainName}", not "${expectedChain}". Nothing was ` +
+          `synced: scanning the wrong chain writes its state over the right one.`,
       );
     }
+    // The genesis half cannot be done through this addon. `info_server` builds
+    // its JSON by hand and carries no genesis_hash (see NativeAddon.info_server),
+    // so `info.genesisHash` is always null and this comparison never fires
+    // today. It is kept, and its emptiness is written down, because the
+    // alternative — deleting it — would leave nothing to say that "same chain
+    // name, different chain" is an unchecked risk. `genesisVerified` on
+    // ServerInfo is what a caller should read before it trusts a balance.
     const expectedGenesis = this.profile?.genesis;
     if (expectedGenesis && info.genesisHash && info.genesisHash !== expectedGenesis) {
-      const actual = info.genesisHash;
-      await this.close().catch(() => {});
       throw new SwarmWalletError(
         "wrong-chain",
-        `${this.server} reports genesis ${actual}, not ${expectedGenesis}. Same chain name, ` +
-          `different chain. The wallet was closed without syncing.`,
+        `${this.server} reports genesis ${info.genesisHash}, not ${expectedGenesis}. Same chain ` +
+          `name, different chain. Nothing was synced.`,
       );
     }
   }
 
-  /** Saves the wallet file and then seals it. */
+  /**
+   * Saves the wallet file and then seals it.
+   *
+   * `save_wallet_file` answers PROSE — "Wallet saved successfully. Size: 420
+   * bytes." — and putting it through the JSON reader is what made the first live
+   * mainnet run fail after the wallet had already been written. A failure
+   * rejects the promise; there is nothing to parse.
+   */
   async #persist(): Promise<void> {
-    await callAddon<unknown>("save_wallet_file", () => this.#addon.save_wallet_file());
+    const answer = await callAddonText("save_wallet_file", () => this.#addon.save_wallet_file());
+    // "Wallet is empty. Nothing to save." is the other benign answer, and it
+    // means there is no file to seal yet.
+    if (/nothing to save/i.test(answer)) return;
     await this.store.save();
   }
 
@@ -771,19 +936,34 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     if (SwarmWallet.#openInstance === this) SwarmWallet.#openInstance = null;
   }
 
-  async #pollSyncFinished(): Promise<boolean> {
-    const raw = await this.#addon.poll_sync();
-    // poll_sync answers prose, not JSON: "Sync task is not complete.", "Sync
-    // task has not been launched.", or the report of a finished run.
+  /**
+   * Whether the sync run has finished.
+   *
+   * `poll_sync` answers prose for both unfinished states and `{"sync_complete":…}`
+   * JSON when it is done. "Sync task has not been launched." must NOT be read as
+   * finished, which is what this did: `sync()` then persisted, emitted `synced`
+   * and resolved, telling the caller the wallet was at the tip when nothing had
+   * scanned. It can appear briefly if the handle is not installed yet, so it is
+   * tolerated a bounded number of times and then reported.
+   */
+  async #pollSyncFinished(unlaunched: { count: number }): Promise<boolean> {
+    const raw = await callAddonText("poll_sync", () => this.#addon.poll_sync());
     if (/not complete/i.test(raw)) return false;
-    if (/has not been launched/i.test(raw)) return true;
-    try {
-      parseAddonJson(raw, "poll_sync");
-    } catch (error) {
-      if (error instanceof SwarmWalletError && error.code === "addon") throw error;
-      // Not JSON and not one of the two known sentences: treat as finished
-      // rather than looping for ever on a message we do not recognise.
+    if (/has not been launched/i.test(raw)) {
+      unlaunched.count += 1;
+      if (unlaunched.count > MAX_UNLAUNCHED_POLLS) {
+        throw new SwarmWalletError(
+          "addon",
+          `the addon still reports "Sync task has not been launched." after ` +
+            `${MAX_UNLAUNCHED_POLLS} polls. Nothing has scanned, so this is not a finished sync.`,
+          { call: "poll_sync" },
+        );
+      }
+      return false;
     }
+    // JSON from here: `{"sync_complete": …}` on success, and a rejected promise
+    // (already turned into a throw above) on failure.
+    parseAddonJson(raw, "poll_sync");
     return true;
   }
 
@@ -832,15 +1012,53 @@ const addressStrings = (value: unknown): readonly string[] => {
   return out;
 };
 
+/**
+ * Which value-transfer kinds mean money left the wallet, and which mean it
+ * arrived.
+ *
+ * Spelled out rather than matched with a regex. The earlier version tested
+ * `/sent|spend|outgoing/i` against whatever string zingolib happened to
+ * serialise, so `"Sent"` was outgoing and `"Send"`, `"SendToSelf"` or an enum
+ * serialised as an object were not — and a spend then appeared as income. On
+ * money, an unknown kind must read as unknown.
+ */
+const OUTGOING_KINDS = new Set([
+  "sent",
+  "send",
+  "outgoing",
+  "sendtoself",
+  "memotoself",
+  "shield",
+  "shielding",
+]);
+const INCOMING_KINDS = new Set(["received", "receive", "incoming"]);
+
 const toTransaction = (raw: Record<string, unknown>): WalletTransaction => {
   const value = raw["value"] ?? raw["amount"] ?? raw["value_zat"];
-  const kind = stringOr(raw["kind"] ?? raw["transfer_kind"] ?? raw["type"], "unknown");
-  const magnitude = value === undefined || value === null ? 0n : zatoshiFromJson(value, "value");
-  const outgoing = /sent|spend|outgoing/i.test(kind);
+  // An enum serialised as `{"Sent": {...}}` carries no string anywhere; its
+  // single key is the kind, so it is read from there rather than becoming
+  // "unknown".
+  const kindField = raw["kind"] ?? raw["transfer_kind"] ?? raw["type"];
+  const kind =
+    typeof kindField === "string"
+      ? kindField
+      : isRecord(kindField) && Object.keys(kindField).length === 1
+        ? String(Object.keys(kindField)[0])
+        : "unknown";
+  const normalised = kind.toLowerCase().replace(/[^a-z]/g, "");
+  const direction: WalletTransaction["direction"] = OUTGOING_KINDS.has(normalised)
+    ? "out"
+    : INCOMING_KINDS.has(normalised)
+      ? "in"
+      : "unknown";
   return {
     txid: stringOr(raw["txid"] ?? raw["transaction_id"], ""),
     kind,
-    valueZat: outgoing && magnitude > 0n ? -magnitude : magnitude,
+    direction,
+    // Always the magnitude. A caller that wants a signed number reads
+    // `direction` and applies the sign itself, so an unrecognised kind cannot be
+    // rendered as income by default.
+    amountZat: value === undefined || value === null ? 0n : zatoshiFromJson(value, "value"),
     feeZat:
       raw["fee"] === undefined || raw["fee"] === null ? null : zatoshiFromJson(raw["fee"], "fee"),
     blockHeight: numberOrNull(raw["block_height"] ?? raw["blockheight"] ?? raw["height"]),

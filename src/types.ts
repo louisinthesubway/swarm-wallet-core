@@ -25,18 +25,25 @@ export type PerformanceLevel = "Maximum" | "High" | "Medium" | "Low";
 /** One zatoshi. 100,000,000 zatoshi = 1 SWM. */
 export const ZATOSHI_PER_SWM = 100_000_000n;
 
-/** What the wallet holds, in zatoshi. */
+/**
+ * What the wallet holds, in zatoshi.
+ *
+ * `totalZat` and `spendableZat` are never guessed: if the addon's answer does not
+ * carry them, `balance()` throws rather than returning a number. The per-pool
+ * fields are `null` when the addon did not say, because a zero there would read
+ * as "this pool is empty" when what is true is "this version cannot see it".
+ */
 export type Balance = {
   /** Everything the wallet can see, confirmed or not. */
   readonly totalZat: bigint;
   /** What can be spent right now, at the configured confirmation depth. */
   readonly spendableZat: bigint;
-  /** Shielded value in Orchard notes. */
-  readonly orchardZat: bigint;
-  /** Shielded value in Sapling notes. */
-  readonly saplingZat: bigint;
-  /** Unshielded value on transparent addresses. */
-  readonly transparentZat: bigint;
+  /** Shielded value in Orchard notes, or `null` when the addon did not report it. */
+  readonly orchardZat: bigint | null;
+  /** Shielded value in Sapling notes, or `null`. */
+  readonly saplingZat: bigint | null;
+  /** Unshielded value on transparent addresses, or `null`. */
+  readonly transparentZat: bigint | null;
   /** Value received but not yet confirmed to the wallet's confirmation depth. */
   readonly pendingZat: bigint;
   /** The addon's own JSON, for anything this shape does not carry. */
@@ -51,11 +58,16 @@ export type AddressSet = {
   readonly transparent: readonly string[];
 };
 
-/** Which receivers a new unified address should carry. */
+/**
+ * Which receivers a new unified address should carry. Both default to true.
+ *
+ * There is no `transparent`: the addon's `generate_unified_address` takes a
+ * `ReceiverSelection { orchard, sapling }` and reads nothing else, so a
+ * transparent flag here would be a promise this package cannot keep.
+ */
 export type ReceiverSelection = {
   readonly orchard?: boolean;
   readonly sapling?: boolean;
-  readonly transparent?: boolean;
 };
 
 /** Where the sync has got to. */
@@ -75,10 +87,20 @@ export type SyncStatus = {
 /** One movement of value in or out of this wallet. */
 export type WalletTransaction = {
   readonly txid: string;
-  /** `"sent"`, `"received"`, `"shield"`, `"memo-to-self"`, … as the SDK names it. */
+  /** `"sent"`, `"received"`, `"shield"`, … exactly as the SDK named it. */
   readonly kind: string;
-  /** Signed: negative when value left the wallet. */
-  readonly valueZat: bigint;
+  /**
+   * Which way the value went, from a list of kinds this package knows.
+   *
+   * `"unknown"` when `kind` is not one of them — and a caller must render that as
+   * unknown rather than assuming income. A spend shown as income is the bug this
+   * field exists to make impossible; the previous version inferred the direction
+   * from a regex over `kind` and got it wrong for every spelling it had not been
+   * shown.
+   */
+  readonly direction: "in" | "out" | "unknown";
+  /** The magnitude, always >= 0. Apply the sign from `direction`. */
+  readonly amountZat: bigint;
   /** The fee this wallet paid, when it paid one. */
   readonly feeZat: bigint | null;
   /** The block it was mined in, or `null` while it is in the mempool. */
@@ -145,13 +167,25 @@ export type SendResult = {
   readonly feeZat: bigint;
 };
 
-/** What the server says it is. */
+/**
+ * What the server says it is.
+ *
+ * Read `genesisVerified` before trusting a balance. It is **false through this
+ * addon, always**: `info_server` builds its JSON by hand and carries no genesis
+ * hash, so "same chain name, different chain" is not something this package can
+ * currently rule out. Closing that needs a new addon entry point.
+ */
 export type ServerInfo = {
-  /** The chain label the indexer reports. Must match the wallet's own. */
+  /** The chain label the indexer reports. Checked against the wallet's own. */
   readonly chainName: string;
-  /** The genesis hash the indexer reports. Must match the profile's. */
+  /** The genesis the indexer reports, or `null` — which is what it is today. */
   readonly genesisHash: string | null;
+  /** Whether the reported genesis matched the profile's. False when unreported. */
+  readonly genesisVerified: boolean;
   readonly blockHeight: number | null;
+  /** The consensus branch id the indexer reports, as it reports it. */
+  readonly consensusBranchId: string | null;
+  readonly saplingActivationHeight: number | null;
   readonly vendor: string | null;
   readonly raw: unknown;
 };

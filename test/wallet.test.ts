@@ -38,10 +38,21 @@ afterEach(async () => {
 
 const key = (): Uint8Array => WalletStore.generateKey();
 
+/**
+ * Opens a wallet on a fresh fake addon and hands back the addon too.
+ *
+ * The addon matters to a caller: one process has one addon and one OnceCell'd
+ * base directory, so a test about reopening has to reuse this one rather than
+ * make a second.
+ */
 const open = async (
   options: FakeAddonOptions = {},
   overrides: Partial<Parameters<typeof SwarmWallet.openOrCreate>[0]> = {},
-): Promise<{ wallet: SwarmWallet; log: ReturnType<typeof createFakeAddon>["log"] }> => {
+): Promise<{
+  wallet: SwarmWallet;
+  log: ReturnType<typeof createFakeAddon>["log"];
+  addon: ReturnType<typeof createFakeAddon>["addon"];
+}> => {
   const { addon, log } = createFakeAddon(options);
   const wallet = await SwarmWallet.openOrCreate({
     addon,
@@ -51,7 +62,7 @@ const open = async (
     ...overrides,
   });
   openWallets.push(wallet);
-  return { wallet, log };
+  return { wallet, log, addon };
 };
 
 describe("openOrCreate", () => {
@@ -112,18 +123,48 @@ describe("openOrCreate", () => {
     await first.wallet.close();
     openWallets.length = 0;
 
-    const { addon, log } = createFakeAddon();
+    // The SAME addon object, because one process has one addon and one
+    // OnceCell'd base directory. Handing the reopen a second fake would give it a
+    // fresh cell and dodge the very thing this test is named for.
+    const log = first.log;
+    const before = log.calls.length;
     const wallet = await SwarmWallet.openOrCreate({
-      addon,
+      addon: first.addon,
       dataDir,
       chain: "swarm-mainnet",
       encryptionKey: storedKey,
     });
     openWallets.push(wallet);
-    expect(log.calls.some((call) => call.name === "init_from_b64")).toBe(true);
-    expect(log.calls.some((call) => call.name === "init_new")).toBe(false);
+    const after = log.calls.slice(before);
+    expect(after.some((call) => call.name === "init_from_b64")).toBe(true);
+    expect(after.some((call) => call.name === "init_new")).toBe(false);
     // And the reopen was given the full hint too, not just the creation.
-    expect(argsOf(log, "init_from_b64")?.[1]).toBe(`swarm-mainnet:${SWARM_MAINNET_GENESIS}`);
+    expect(after.find((call) => call.name === "init_from_b64")?.args[1]).toBe(
+      `swarm-mainnet:${SWARM_MAINNET_GENESIS}`,
+    );
+  });
+
+  it("reopens in the same process although set_wallet_base_dir answers false", async () => {
+    // The addon's base dir is a OnceCell with no getter and no reset: the second
+    // call returns false even for the identical path. Treating that as fatal made
+    // close-then-reopen impossible, which is the ordinary flow after an error, an
+    // account switch, or the wrong-chain refusal.
+    const storedKey = key();
+    const first = await open({}, { encryptionKey: storedKey });
+    await first.wallet.close();
+    openWallets.length = 0;
+
+    const second = await SwarmWallet.openOrCreate({
+      addon: first.addon,
+      dataDir,
+      chain: "swarm-mainnet",
+      encryptionKey: storedKey,
+    });
+    openWallets.push(second);
+    expect(second.store.paths.baseDir).toBe(dataDir);
+    const setCalls = first.log.calls.filter((call) => call.name === "set_wallet_base_dir");
+    // Once, not twice: the second open knows this process already did it.
+    expect(setCalls).toHaveLength(1);
   });
 
   it("refuses a wallet sealed with a different key instead of overwriting it", async () => {
@@ -152,11 +193,26 @@ describe("openOrCreate", () => {
     expect(SwarmWallet.current()).toBeNull();
   });
 
-  it("closes the wallet and refuses when the server reports another genesis", async () => {
+  it("refuses another genesis IF the addon ever reports one", async () => {
     const { addon } = createFakeAddon({ serverGenesis: "ff".repeat(32) });
     await expect(
       SwarmWallet.openOrCreate({ addon, dataDir, chain: "swarm-mainnet", encryptionKey: key() }),
     ).rejects.toThrow(/Same chain name, different chain/);
+  });
+
+  it("says plainly that the genesis is NOT verified, because the addon reports none", async () => {
+    // The honest state of the world. info_server builds its JSON by hand and
+    // carries no genesis_hash, so the guard above cannot fire in production. A
+    // caller that needs to know reads genesisVerified; the previous version had
+    // a guard that looked tested only because the fake invented a field.
+    const { wallet } = await open();
+    const info = await wallet.serverInfo();
+    expect(info.chainName).toBe("swarm-mainnet");
+    expect(info.genesisHash).toBeNull();
+    expect(info.genesisVerified).toBe(false);
+    // And the height comes from latest_block_height, which is what the addon calls it.
+    expect(info.blockHeight).toBe(1000);
+    expect(info.consensusBranchId).toBe("c8e71055");
   });
 });
 
@@ -225,12 +281,20 @@ describe("reading", () => {
     expect(balance.pendingZat).toBe(50_000_000n);
   });
 
-  it("refuses a balance shape it does not recognise, rather than reporting zero", async () => {
+  it("refuses a balance shape it cannot read, rather than reporting a wrong number", async () => {
     // A wallet screen showing 0 SWM for a funded wallet is the worst failure this
     // package can have, and a renamed SDK field is how it would happen.
     const { wallet } = await open({ unknownBalanceShape: true });
-    await expect(wallet.balance()).rejects.toThrow(/does not recognise/);
-    await expect(wallet.balance()).rejects.toThrow(/Refusing rather than reporting a zero balance/);
+    await expect(wallet.balance()).rejects.toThrow(/cannot read/);
+    await expect(wallet.balance()).rejects.toThrow(/wrong rather than one that is unknown/);
+  });
+
+  it("refuses when ONE pool field is renamed, not only when all of them are", async () => {
+    // The dangerous case. With a per-pool fallback to 0n, renaming just the
+    // orchard field reported a funded wallet as short by its entire shielded
+    // balance — successfully, with no complaint.
+    const { wallet } = await open({ renameOrchardBalance: true });
+    await expect(wallet.balance()).rejects.toThrow(/no readable orchard balance/);
   });
 
   it("formats the spendable balance for a label", async () => {
@@ -245,39 +309,100 @@ describe("reading", () => {
     expect(transparent[0]).toMatch(/^s1/);
   });
 
-  it("creates a new unified address with all three receivers by default", async () => {
+  it("asks for both shielded receivers with the FLAG STRING the addon reads", async () => {
     const { wallet, log } = await open();
     const created = await wallet.newAddress();
     expect(created).toMatch(/^swm1/);
-    expect(argsOf(log, "create_new_unified_address")?.[0]).toBe(
-      JSON.stringify({ orchard: true, sapling: true, transparent: true }),
+    // "oz", not JSON. The addon reads receivers.contains('o') and
+    // receivers.contains('z'); JSON.stringify({orchard:false,sapling:true})
+    // contains an "o" (inside "orchard") and no "z", so it would have asked for
+    // orchard only whatever the flags said.
+    expect(argsOf(log, "create_new_unified_address")?.[0]).toBe("oz");
+  });
+
+  it("asks for sapling alone as \"z\", which JSON could never express", async () => {
+    const { wallet, log } = await open();
+    await wallet.newAddress({ orchard: false, sapling: true });
+    expect(argsOf(log, "create_new_unified_address")?.[0]).toBe("z");
+  });
+
+  it("refuses a selection with no shielded receiver at all", async () => {
+    const { wallet } = await open();
+    await expect(wallet.newAddress({ orchard: false, sapling: false })).rejects.toThrow(
+      /at least one shielded receiver/,
     );
   });
 
-  it("signs outgoing transaction values negative and keeps the memo", async () => {
+  it("reports a direction rather than guessing a sign, and keeps the memo", async () => {
     const { wallet } = await open();
-    const [received, sent] = await wallet.transactions();
-    expect(received?.valueZat).toBe(200_000_000n);
+    const [received, sent, enumShaped, unrecognised] = await wallet.transactions();
+
+    expect(received?.direction).toBe("in");
+    expect(received?.amountZat).toBe(200_000_000n);
     expect(received?.memo).toBe("for the coffee");
-    expect(sent?.valueZat).toBe(-50_000_000n);
+
+    expect(sent?.direction).toBe("out");
+    expect(sent?.amountZat).toBe(50_000_000n);
     expect(sent?.feeZat).toBe(10_000n);
+
+    // `{"Sent": {...}}` is a spend however the SDK chose to serialise it.
+    expect(enumShaped?.kind).toBe("Sent");
+    expect(enumShaped?.direction).toBe("out");
+
+    // And a kind nothing recognises must read as unknown, not as income. The
+    // previous version matched /sent|spend|outgoing/i over this string, so
+    // anything it had not been shown became a positive amount: a spend displayed
+    // as money arriving.
+    expect(unrecognised?.kind).toBe("Rearrangement");
+    expect(unrecognised?.direction).toBe("unknown");
+    expect(unrecognised?.amountZat).toBe(2_000n);
   });
 
   it("hands over the seed only when asked for it by name", async () => {
-    const { wallet } = await open();
+    const { wallet, log } = await open();
     const { phrase, birthdayHeight } = await wallet.seedPhrase();
     expect(phrase.split(" ")).toHaveLength(24);
     expect(birthdayHeight).toBe(1);
-    // And it is not part of anything else the wallet returns. (`raw` carries
-    // bigints, so the balance is stringified with a bigint-aware replacer.)
-    const balance = JSON.stringify(await wallet.balance(), (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value,
-    );
-    expect(balance).not.toContain("abandon");
+    // And nothing else asked the addon for it. (The previous version searched the
+    // balance object for a seed word, which three fixed integers could never
+    // contain — an assertion that cannot fail. What is worth checking is that
+    // get_seed is called once, and only from here.)
+    expect(log.calls.filter((call) => call.name === "get_seed")).toHaveLength(1);
   });
 });
 
 describe("parseAddress", () => {
+  it("refuses an address from another chain even on a chain with no SWARM profile", async () => {
+    // `main`, `test` and `regtest` have no profile, so there is no prefix
+    // pre-check in front of the addon — and the addon happily decodes a testnet
+    // address and reports chain_name "test". Without comparing that, the verdict
+    // came back valid and proposeSend went ahead with it.
+    const { addon } = createFakeAddon();
+    const wallet = await SwarmWallet.openOrCreate({
+      addon,
+      dataDir,
+      chain: "main",
+      server: "https://example.invalid:443",
+      encryptionKey: key(),
+      verifyServerIdentity: false,
+    });
+    openWallets.push(wallet);
+    // The fake decodes u1…/t1… as chain_name "main", so that one is accepted…
+    await expect(wallet.parseAddress("u1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq")).resolves.toMatchObject({
+      valid: true,
+    });
+    // …and one the addon decodes as a DIFFERENT chain is refused, with a sentence
+    // naming both. Before this it came back valid and proposeSend went ahead.
+    const verdict = await wallet.parseAddress("utest1anAddressOnZcashTestnet");
+    expect(verdict.valid).toBe(false);
+    if (!verdict.valid) {
+      expect(verdict.reason).toMatch(/belongs to "test" and this wallet is on "main"/);
+    }
+    await expect(
+      wallet.proposeSend({ to: "utest1anAddressOnZcashTestnet", amountZat: 1n }),
+    ).rejects.toThrow(/belongs to "test"/);
+  });
+
   it("refuses a Zcash address with a sentence that names the network", async () => {
     const { wallet } = await open();
     const verdict = await wallet.parseAddress("u1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq");
@@ -326,6 +451,24 @@ describe("sending", () => {
     expect(payload[0]).toEqual({ address, amount: 12_345_678, memo: "hello" });
   });
 
+  it("refuses a STALE quote, because the addon holds only the newest proposal", async () => {
+    // The bug this prevents, in three lines: quote A for 1 000 to Alice, quote B
+    // for 999 000 to Bob, then a.confirm() — which transmitted B, paying Bob,
+    // and reported A's fee. The addon stores exactly one proposal and `confirm`
+    // transmits whatever is in it.
+    const { wallet, log } = await open();
+    const [alice] = (await wallet.addresses()).unified;
+    const bob = await wallet.newAddress();
+
+    const a = await wallet.proposeSend({ to: alice!, amountZat: 1_000n });
+    const b = await wallet.proposeSend({ to: bob, amountZat: 999_000n });
+
+    await expect(a.confirm()).rejects.toThrow(/stale/);
+    expect(log.calls.some((call) => call.name === "confirm")).toBe(false);
+    // The newest quote still works, and it is the one the addon is holding.
+    await expect(b.confirm()).resolves.toMatchObject({ feeZat: 15_000n });
+  });
+
   it("refuses a second confirm of the same quote", async () => {
     const { wallet } = await open();
     const [address] = (await wallet.addresses()).unified;
@@ -367,6 +510,17 @@ describe("sending", () => {
 });
 
 describe("syncing", () => {
+  it("does not call an unlaunched sync a finished sync", async () => {
+    // "Sync task has not been launched." used to be read as finished: sync()
+    // persisted, emitted `synced` and resolved, telling the caller the wallet was
+    // at the tip when nothing had scanned at all.
+    const { wallet } = await open({ neverLaunches: true });
+    const events: string[] = [];
+    wallet.on("synced", () => events.push("synced"));
+    await expect(wallet.sync()).rejects.toThrow(/has not been launched/);
+    expect(events).toEqual([]);
+  }, 60_000);
+
   it("loops over the addon's prose poll answers and resolves when the run ends", async () => {
     const { wallet } = await open({ syncPolls: 2 });
     const seen: number[] = [];
@@ -397,6 +551,27 @@ describe("syncing", () => {
 });
 
 describe("close", () => {
+  it("leaves the plaintext in place when the seal fails, and says so", async () => {
+    // The plaintext used to be wiped in a `finally`, so a failed seal — a full
+    // disk, an EPERM on the temp file, an antivirus holding it — destroyed the
+    // only copy of the wallet and left a stale ciphertext or none at all.
+    const { wallet, addon } = await open();
+    const workingFile = wallet.store.paths.workingFile;
+    expect(existsSync(workingFile)).toBe(true);
+
+    // Break the seal by making the working file unreadable to the store: the
+    // addon will "save" to a path the store no longer sees as a file.
+    const { rm: remove, mkdir: makeDir } = await import("node:fs/promises");
+    await remove(workingFile);
+    await makeDir(workingFile);
+
+    await expect(wallet.close()).rejects.toThrow(/could not be sealed|LEFT IN PLACE/);
+    openWallets.length = 0;
+    // Whatever is at that path, close() did not delete it behind an error.
+    expect(existsSync(workingFile)).toBe(true);
+    expect(addon).toBeDefined();
+  });
+
   it("leaves the ciphertext and no plaintext behind", async () => {
     const { wallet } = await open();
     const { workingFile, encryptedFile } = wallet.store.paths;

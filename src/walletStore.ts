@@ -52,10 +52,19 @@
  *   filesystem (APFS, btrfs, any SSD doing wear levelling) that does not
  *   guarantee the old blocks are gone. Said here rather than implied.
  * * A crash leaves the working file behind. `open()` finds it, refuses to trust
- *   it silently, and takes the documented recovery path: if the ciphertext is
- *   newer or the same age it wins and the stale working file is wiped; if the
- *   working file is newer it is re-encrypted first, because it is the only copy
- *   of whatever the wallet learned before the crash.
+ *   it silently, and takes the documented recovery path: a working file at least
+ *   as new as the ciphertext is re-encrypted first, because it is the only copy
+ *   of whatever the wallet learned before the crash; only a strictly older one is
+ *   wiped. Ties go to the working file deliberately — on a filesystem with
+ *   coarse timestamps the two can share an mtime, and throwing away the only copy
+ *   is the worse of the two mistakes.
+ * * A plaintext wallet with no ciphertext beside it — the desktop wallet's file,
+ *   or this package run once without a key — is **adopted**: sealed in place and
+ *   left where the addon expects it. `exists()` sees it too, so nothing reports
+ *   "no wallet here" and writes a new seed over it.
+ * * `close()` wipes the plaintext only when there is a sealed copy of it. A
+ *   failed seal leaves the plaintext alone and throws, because after a failed
+ *   save the plaintext is the only copy there is.
  *
  * ## Plaintext mode
  *
@@ -164,10 +173,22 @@ export class WalletStore {
     };
   }
 
-  /** Whether a wallet exists at rest, in whichever mode this store is in. */
+  /**
+   * Whether a wallet exists here at all.
+   *
+   * In encrypted mode this looks at the plaintext working file **as well as** the
+   * ciphertext, and that is not a nicety. It used to look only at the ciphertext,
+   * so a plaintext wallet left by the desktop wallet — or by an earlier run of
+   * this package with no key — was invisible: `openOrCreate` reported
+   * `existed: false`, ran `init_new`, and the addon wrote a brand new seed over a
+   * funded wallet's file and then sealed it. `#decrypt`'s own error text
+   * advertises that migration path, and `exists()` guaranteed it was never
+   * reached.
+   */
   async exists(): Promise<boolean> {
-    const target = this.paths.encryptedFile ?? this.paths.workingFile;
-    return fileExists(target);
+    const { encryptedFile, workingFile } = this.paths;
+    if (await fileExists(workingFile)) return true;
+    return encryptedFile === null ? false : fileExists(encryptedFile);
   }
 
   /**
@@ -181,6 +202,19 @@ export class WalletStore {
     if (this.#open) {
       throw new SwarmWalletError("already-open", "This WalletStore is already open.");
     }
+    try {
+      return await this.#openInner();
+    } catch (error) {
+      // A wrong key or an altered file is the ordinary failure here, and the key
+      // used to stay live in a Buffer for the life of the process afterwards
+      // because only close() cleared it — and there is no wallet object to close.
+      this.#key?.fill(0);
+      this.#key = null;
+      throw error;
+    }
+  }
+
+  async #openInner(): Promise<WalletPaths> {
     await mkdir(this.paths.chainDir, { recursive: true, mode: 0o700 });
     await chmodQuietly(this.paths.chainDir, 0o700);
 
@@ -195,11 +229,23 @@ export class WalletStore {
       fileExists(workingFile),
     ]);
 
+    if (hasWorking && !hasCipher) {
+      // A plaintext wallet and no ciphertext: either the desktop wallet's file,
+      // or this package run once without a key. Seal it in place and leave the
+      // plaintext where the addon expects it. Adopting it is the only safe
+      // answer — the alternative is what used to happen, which was not seeing it
+      // and writing a new seed over it.
+      await this.save();
+      this.#open = true;
+      return this.paths;
+    }
+
     if (hasWorking && hasCipher) {
       const [workingStat, cipherStat] = await Promise.all([stat(workingFile), stat(encryptedFile)]);
-      if (workingStat.mtimeMs > cipherStat.mtimeMs) {
-        // The working file is the only copy of whatever the wallet learned
-        // before the crash. Seal it before anything overwrites it.
+      // `>=`, not `>`: on a filesystem with coarse timestamps a genuinely newer
+      // post-crash working file can share the ciphertext's mtime, and throwing
+      // away the only copy of what the wallet learned is the worse mistake.
+      if (workingStat.mtimeMs >= cipherStat.mtimeMs) {
         await this.save();
       } else {
         await this.#wipeWorkingFile();
@@ -227,10 +273,24 @@ export class WalletStore {
   async save(): Promise<void> {
     const { encryptedFile, workingFile } = this.paths;
     if (encryptedFile === null) return;
-    if (!(await fileExists(workingFile))) {
+    const info = await stat(workingFile).catch(() => null);
+    if (info === null) {
       throw new SwarmWalletError(
         "wallet-file",
         `nothing to seal: the addon has not written ${workingFile}. Call save_wallet_file() first.`,
+      );
+    }
+    // A zero-length working file must never replace a good ciphertext.
+    // `#wipeWorkingFile` truncates before it unlinks, so a failed unlink (a
+    // Windows file lock) or a crash in that window leaves an empty file with a
+    // fresh mtime — which `open()` would then read as "newer, therefore the only
+    // copy" and seal over the real wallet.
+    if (info.size === 0) {
+      throw new SwarmWalletError(
+        "wallet-file",
+        `refusing to seal ${workingFile}: it is empty. An empty wallet file is what a wiped or ` +
+          `half-written one looks like, and sealing it would replace the wallet at rest with ` +
+          `nothing.`,
       );
     }
     const plaintext = await readFile(workingFile);
@@ -258,17 +318,41 @@ export class WalletStore {
    */
   async close(options: { seal?: boolean } = {}): Promise<void> {
     const { seal = true } = options;
-    try {
-      if (seal && this.paths.encryptedFile !== null && (await fileExists(this.paths.workingFile))) {
+    const encrypted = this.paths.encryptedFile !== null;
+    const hadPlaintext = encrypted && (await fileExists(this.paths.workingFile));
+    let sealed = false;
+    let sealError: unknown = null;
+    if (seal && hadPlaintext) {
+      try {
         await this.save();
+        sealed = true;
+      } catch (error) {
+        sealError = error;
       }
-    } finally {
-      if (this.paths.encryptedFile !== null) {
+    }
+    try {
+      // The plaintext is wiped ONLY when there is a sealed copy of it, or when the
+      // caller said not to seal. Wiping after a failed save — a full disk, an
+      // EPERM on the temp file, an antivirus holding it, a rename that did not
+      // land — destroyed the only copy of the wallet and left either a stale
+      // ciphertext or, on a first save, none at all. The error propagated, by
+      // which time the seed was gone.
+      if (encrypted && (!hadPlaintext || sealed || !seal)) {
         await this.#wipeWorkingFile();
       }
+    } finally {
       this.#key?.fill(0);
       this.#key = null;
       this.#open = false;
+    }
+    if (sealError !== null) {
+      throw new SwarmWalletError(
+        "wallet-file",
+        `the wallet could not be sealed: ${(sealError as Error).message}. The plaintext wallet ` +
+          `file has been LEFT IN PLACE at ${this.paths.workingFile}, because it is the only ` +
+          `copy — do not delete it, and do not report this wallet as closed.`,
+        { cause: sealError },
+      );
     }
   }
 

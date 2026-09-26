@@ -1,11 +1,19 @@
 /**
  * A stand-in for `native.node`.
  *
- * It answers the JSON shapes the real addon answers, taken from the entry points
- * in `native/src/lib.rs` at wallet `745c2092` — including the two failure shapes
- * (a thrown `Error`, and a resolved `{"error": …}`), and including the prose
- * `poll_sync` answers, which are not JSON at all. A mock that answers tidier JSON
- * than the addon does is a mock that hides the bugs this wrapper exists to absorb.
+ * It answers what the real addon answers, read out of `native/src/lib.rs` at
+ * wallet `745c2092` — including the two failure shapes (a thrown `Error`, and a
+ * resolved `{"error": …}`) and, above all, **the prose**. `save_wallet_file`,
+ * `run_sync`, `pause_sync`, `stop_sync`, `run_rescan` and two of `poll_sync`'s
+ * three answers are English sentences, and `check_save_error` is the empty
+ * string. `create_new_unified_address` answers ONE object with the address under
+ * `encoded_address`, and takes a flag string (`"oz"`), not JSON.
+ *
+ * An earlier version of this file answered tidy JSON for all of those. Every test
+ * passed, and the first live mainnet run failed on the first save:
+ * `save_wallet_file answered something that is not JSON: Wallet saved
+ * successfully. Size: 420 bytes.` A mock that is tidier than the addon is a mock
+ * that certifies the bug.
  *
  * It also writes a wallet file, because `WalletStore` has one to encrypt and a
  * test that skips that step proves nothing about the sealing.
@@ -20,9 +28,17 @@ import type { NativeAddon } from "../src/nativeAddon.js";
 export type FakeAddonOptions = {
   /** Fail `init_new` with this message. */
   readonly initError?: string;
-  /** What `info_server` reports. Defaults to matching SWARM production. */
+  /** What `info_server` reports as its chain label. Defaults to swarm-mainnet. */
   readonly serverChain?: string;
+  /**
+   * Make `info_server` carry a `genesis_hash`. The real addon carries none, so
+   * this exists only to exercise the guard for the day it does.
+   */
   readonly serverGenesis?: string;
+  /** Make `save_wallet_file` reject, as a full disk would. */
+  readonly saveError?: string;
+  /** Make `poll_sync` always answer "Sync task has not been launched." */
+  readonly neverLaunches?: boolean;
   /** Refuse to accept the wallet base directory, as a second caller would. */
   readonly refuseBaseDir?: boolean;
   /** Make `send` answer `{"error": …}` instead of a fee. */
@@ -31,6 +47,8 @@ export type FakeAddonOptions = {
   readonly syncPolls?: number;
   /** Answer `get_balance` with a shape this version does not know. */
   readonly unknownBalanceShape?: boolean;
+  /** Rename ONLY the orchard field, the dangerous half-recognised case. */
+  readonly renameOrchardBalance?: boolean;
 };
 
 /** What the fake recorded, so a test can assert on the arguments it was given. */
@@ -173,14 +191,18 @@ export const createFakeAddon = (
     async save_wallet_file(): Promise<string> {
       requireOpen("save_wallet_file");
       if (walletFile === null) throw new Error("no wallet path");
+      if (options.saveError) throw new Error(`Save error. ${options.saveError}`);
       mkdirSync(dirname(walletFile), { recursive: true });
-      writeFileSync(walletFile, `fake zingolib wallet bytes ${log.calls.length}`);
-      return JSON.stringify({ result: "success" });
+      const bytes = `fake zingolib wallet bytes ${log.calls.length}`;
+      writeFileSync(walletFile, bytes);
+      // Prose. Verbatim from lib.rs.
+      return `Wallet saved successfully. Size: ${bytes.length} bytes.`;
     },
 
     async check_save_error(): Promise<string> {
       requireOpen("check_save_error");
-      return JSON.stringify({ result: "success" });
+      // The empty string is success. Not JSON.
+      return "";
     },
 
     async get_wallet_save_required(): Promise<string> {
@@ -206,6 +228,15 @@ export const createFakeAddon = (
       if (options.unknownBalanceShape) {
         // What a renamed SDK field set would look like from here.
         return JSON.stringify({ pools: { orchard: 150_000_000 }, unit: "zatoshi" });
+      }
+      if (options.renameOrchardBalance) {
+        // One field renamed and the rest intact: the case a per-pool fallback to
+        // zero would report as a funded wallet missing its whole shielded balance.
+        return JSON.stringify({
+          orchard_note_value: 150_000_000,
+          sapling_balance: 0,
+          transparent_balance: 50_000_000,
+        });
       }
       return JSON.stringify({
         orchard_balance: 150_000_000,
@@ -233,12 +264,21 @@ export const createFakeAddon = (
       requireOpen("create_new_unified_address");
       log.calls.at(-1)!.args = [receivers] as unknown[];
       addressCounter += 1;
-      unified.push(
+      const created =
         addressCounter === 1
           ? "swm1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce6skyprw"
-          : `swm1newaddress${addressCounter}`,
-      );
-      return JSON.stringify(unified);
+          : `swm1newaddress${addressCounter}`;
+      unified.push(created);
+      // One object, the address under `encoded_address`, and the receivers read
+      // from the FLAG STRING exactly as the addon reads them.
+      return JSON.stringify({
+        account: 0,
+        address_index: addressCounter,
+        has_orchard: receivers.includes("o"),
+        has_sapling: receivers.includes("z"),
+        has_transparent: false,
+        encoded_address: created,
+      });
     },
 
     async create_new_transparent_address(): Promise<string> {
@@ -269,6 +309,10 @@ export const createFakeAddon = (
           address: "swm1recipient",
           memo: null,
         },
+        // An enum serialised as an object, and a kind nothing recognises. Both
+        // shapes the SDK could produce, and neither may be read as income.
+        { txid: "cc".repeat(32), kind: { Sent: { pool: "orchard" } }, value: 1_000 },
+        { txid: "dd".repeat(32), kind: "Rearrangement", value: 2_000 },
       ]);
     },
 
@@ -280,27 +324,28 @@ export const createFakeAddon = (
     async run_sync(): Promise<string> {
       requireOpen("run_sync");
       pollsLeft = options.syncPolls ?? 1;
-      return JSON.stringify({ result: "success" });
+      return "Launching sync task...";
     },
 
     async poll_sync(): Promise<string> {
       requireOpen("poll_sync");
+      if (options.neverLaunches) return "Sync task has not been launched.";
       if (pollsLeft > 0) {
         pollsLeft -= 1;
         // Prose, not JSON. This is verbatim what the addon answers.
         return "Sync task is not complete.";
       }
-      return JSON.stringify({ result: "success" });
+      return JSON.stringify({ sync_complete: { scanned: 100 } });
     },
 
     async pause_sync(): Promise<string> {
       requireOpen("pause_sync");
-      return JSON.stringify({ result: "success" });
+      return "Pausing sync task...";
     },
 
     async stop_sync(): Promise<string> {
       requireOpen("stop_sync");
-      return JSON.stringify({ result: "success" });
+      return "Sync already stopped.";
     },
 
     async status_sync(): Promise<string> {
@@ -310,7 +355,7 @@ export const createFakeAddon = (
 
     async run_rescan(): Promise<string> {
       requireOpen("run_rescan");
-      return JSON.stringify({ result: "success" });
+      return "Launching rescan...";
     },
 
     async get_latest_block_wallet(): Promise<string> {
@@ -325,13 +370,23 @@ export const createFakeAddon = (
 
     async info_server(): Promise<string> {
       requireOpen("info_server");
+      // Exactly the nine fields lib.rs builds by hand. There is NO genesis_hash
+      // and NO block_height; the height is `latest_block_height`. A fake that
+      // invented a genesis made the wrapper's genesis guard look tested when in
+      // production it could never fire.
       return JSON.stringify({
-        chain_name: options.serverChain ?? "swarm-mainnet",
-        genesis_hash:
-          options.serverGenesis ??
-          "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd",
-        block_height: 1000,
+        version: "fake",
+        git_commit: "0000000",
+        server_uri: "https://lwd-main.swarm.green:8443/",
         vendor: "SWARM lightwalletd",
+        taddr_support: true,
+        chain_name: options.serverChain ?? "swarm-mainnet",
+        sapling_activation_height: 1,
+        consensus_branch_id: "c8e71055",
+        latest_block_height: 1000,
+        // Only when a test deliberately asks for it, to exercise the guard that
+        // will matter the day the addon reports one.
+        ...(options.serverGenesis === undefined ? {} : { genesis_hash: options.serverGenesis }),
       });
     },
 
@@ -358,11 +413,25 @@ export const createFakeAddon = (
     async parse_address(address: string): Promise<string> {
       record("parse_address", address);
       // The real addon tries Zcash main/test/regtest only, so a swm1 address is
-      // refused here exactly as it is refused there.
+      // refused here exactly as it is refused there — and, just as there, it will
+      // happily decode an address from a DIFFERENT one of those three and say
+      // which. That is the case a wallet on `main` has to refuse for itself.
       if (address.startsWith("u1") || address.startsWith("t1")) {
         return JSON.stringify({
           status: "success",
           chain_name: "main",
+          address_kind: "unified",
+          receivers_available: ["orchard", "sapling"],
+        });
+      }
+      if (
+        address.startsWith("utest1") ||
+        address.startsWith("ztestsapling1") ||
+        address.startsWith("tm")
+      ) {
+        return JSON.stringify({
+          status: "success",
+          chain_name: "test",
           address_kind: "unified",
           receivers_available: ["orchard", "sapling"],
         });

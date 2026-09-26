@@ -88,9 +88,12 @@ export type NativeAddon = {
     wallet_name: string,
   ): string;
 
-  /** Writes the wallet file. `{"result":"success"}` or `{"error":…}`. */
+  /**
+   * Writes the wallet file. **PROSE, not JSON**: "Wallet saved successfully.
+   * Size: N bytes." or "Wallet is empty. Nothing to save.". A failure rejects.
+   */
   save_wallet_file(): Promise<string>;
-  /** Whether the last background save failed. */
+  /** Whether the last background save failed. **The empty string** on success. */
   check_save_error(): Promise<string>;
   /** Whether the wallet has unsaved changes. */
   get_wallet_save_required(): Promise<string>;
@@ -105,25 +108,58 @@ export type NativeAddon = {
   get_spendable_balance_total(): Promise<string>;
   get_unified_addresses(): Promise<string>;
   get_transparent_addresses(): Promise<string>;
+  /**
+   * Adds a unified address to the account and answers ONE object:
+   * `{account, address_index, has_orchard, has_sapling, has_transparent,
+   * encoded_address}` — not a list, and the address is under
+   * `encoded_address`.
+   *
+   * `receivers` is a **flag string**, not JSON: the addon reads
+   * `receivers.contains('o')` for orchard and `receivers.contains('z')` for
+   * sapling, and reads nothing else. So `"oz"` means both, `"o"` orchard only,
+   * `"z"` sapling only. Passing `JSON.stringify({orchard:false, sapling:true})`
+   * asks for **orchard only**, because that text contains an `o` and no `z`.
+   */
   create_new_unified_address(receivers: string): Promise<string>;
   create_new_transparent_address(): Promise<string>;
   get_value_transfers(): Promise<string>;
   get_messages(address: string): Promise<string>;
 
-  /** Starts the background sync task. */
+  /**
+   * Starts (or resumes) the background sync task. **PROSE**: "Launching sync
+   * task.", "Resuming sync task." or "Sync task already running."
+   */
   run_sync(): Promise<string>;
-  /** Asks whether the sync task has finished; does not block on it. */
+  /**
+   * Asks whether the sync task has finished; does not block on it. **PROSE for
+   * the two unfinished states** — "Sync task has not been launched." and "Sync
+   * task is not complete." — and `{"sync_complete": …}` JSON when it is done.
+   */
   poll_sync(): Promise<string>;
+  /** **PROSE**: "Pausing sync task." */
   pause_sync(): Promise<string>;
+  /** **PROSE**: "Stopping sync task." or "Sync already stopped." */
   stop_sync(): Promise<string>;
+  /** JSON, from `pepper_sync::sync_status`. */
   status_sync(): Promise<string>;
+  /** **PROSE**: "Launching rescan." */
   run_rescan(): Promise<string>;
 
   /** `{"height":N}` from the wallet's own view. */
   get_latest_block_wallet(): Promise<string>;
   /** `{"height":N}` from the server, without an open wallet. */
   get_latest_block_server(server_uri: string): Promise<string>;
-  /** The server's `GetLightdInfo`: chain name, genesis hash, block height. */
+  /**
+   * The server's `GetLightdInfo`, as JSON. The fields it really carries, built
+   * by hand in `lib.rs` because `ServerInfo` does not derive `Serialize`:
+   * `version`, `git_commit`, `server_uri`, `vendor`, `taddr_support`,
+   * `chain_name`, `sapling_activation_height`, `consensus_branch_id`,
+   * `latest_block_height`.
+   *
+   * **There is no `genesis_hash`.** See `SwarmWallet.serverInfo`: the genesis
+   * half of the server-identity check cannot be done through this addon, and
+   * saying so is better than a guard that silently never fires.
+   */
   info_server(): Promise<string>;
   change_server(server_uri: string): Promise<string>;
 

@@ -68,15 +68,35 @@ export const parseAddonJson = <T = unknown>(raw: string, call: string): T => {
 };
 
 /**
- * Runs an addon call and rewrites whichever way it fails.
+ * Runs an addon call and rewrites whichever way it fails, returning the raw
+ * string it answered.
+ *
+ * For the entry points that answer **prose**, which is most of the ones that do
+ * something rather than report something:
+ *
+ *   save_wallet_file  "Wallet saved successfully. Size: 420 bytes."
+ *                     "Wallet is empty. Nothing to save."
+ *   run_sync          "Launching sync task." / "Sync task already running."
+ *                     / "Resuming sync task."
+ *   pause_sync        "Pausing sync task."
+ *   stop_sync         "Stopping sync task." / "Sync already stopped."
+ *   run_rescan        "Launching rescan."
+ *   poll_sync         "Sync task has not been launched."
+ *                     / "Sync task is not complete."  (or JSON when ready)
+ *   check_save_error  ""  (the empty string, on success)
+ *
+ * None of these can report a failure on the data channel — the addon says so in
+ * `save_wallet_file`: "only benign status strings (which never begin with
+ * "error") cross on the data channel, so no success can resemble a failure".
+ * Failures reject the promise instead. So there is nothing to parse and nothing
+ * to check: the string is the answer.
  *
  * The addon's thrown errors carry zingolib cause chains, which are the useful
  * part; they are kept verbatim as the message and as `cause`.
  */
-export const callAddon = async <T>(call: string, work: () => Promise<string>): Promise<T> => {
-  let raw: string;
+export const callAddonText = async (call: string, work: () => Promise<string>): Promise<string> => {
   try {
-    raw = await work();
+    return await work();
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     throw new SwarmWalletError(
@@ -85,6 +105,19 @@ export const callAddon = async <T>(call: string, work: () => Promise<string>): P
       { call, cause },
     );
   }
+};
+
+/**
+ * The same, for the entry points that answer JSON, parsing it and turning an
+ * `{"error": …}` object into a throw.
+ *
+ * Use `callAddonText` for anything in the list above. Putting one of those
+ * through here is the bug that made the first live mainnet run fail:
+ * `save_wallet_file answered something that is not JSON: Wallet saved
+ * successfully. Size: 420 bytes.`
+ */
+export const callAddon = async <T>(call: string, work: () => Promise<string>): Promise<T> => {
+  const raw = await callAddonText(call, work);
   return parseAddonJson<T>(raw, call);
 };
 

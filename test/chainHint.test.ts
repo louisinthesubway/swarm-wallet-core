@@ -147,13 +147,18 @@ const callSites = (): CallSite[] => {
       let match = pattern.exec(text);
       while (match !== null) {
         const args = splitArguments(argumentsAt(text, match.index + match[0].length - 1));
-        if (args.length > position) {
-          found.push({
-            file: relative(join(here, ".."), file).replace(/\\/g, "/"),
-            fn,
-            chainArgument: (args[position] ?? "").trim(),
-          });
-        }
+        found.push({
+          file: relative(join(here, ".."), file).replace(/\\/g, "/"),
+          fn,
+          // A call with fewer arguments than the hint's position is recorded with
+          // a marker rather than skipped. Skipping it was the shape of the very
+          // bug this file exists to catch: a call site that had dropped an
+          // argument would have been swept over in silence.
+          chainArgument:
+            args.length > position
+              ? (args[position] ?? "").trim()
+              : `<only ${args.length} argument(s); the hint belongs at ${position}>`,
+        });
         match = pattern.exec(text);
       }
     }

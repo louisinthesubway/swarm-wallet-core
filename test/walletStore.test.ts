@@ -9,7 +9,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm, utimes } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -139,6 +139,40 @@ describe("encrypted mode", () => {
     await expect(store(key).open()).rejects.toThrow(/container magic/);
   });
 
+  it("refuses to seal an EMPTY working file over a good ciphertext", async () => {
+    // #wipeWorkingFile truncates before it unlinks, so a failed unlink or a crash
+    // in that window leaves a 0-byte file with a fresh mtime — which open() would
+    // read as "newer, therefore the only copy" and seal over the real wallet.
+    const key = WalletStore.generateKey();
+    const one = store(key);
+    const { workingFile } = await one.open();
+    writeFileSync(workingFile, PLAINTEXT);
+    await one.save();
+    writeFileSync(workingFile, "");
+    await expect(one.save()).rejects.toThrow(/it is empty/);
+    await one.close({ seal: false });
+
+    // And the wallet at rest survived.
+    const two = store(key);
+    const paths = await two.open();
+    expect(readFileSync(paths.workingFile, "utf8")).toBe(PLAINTEXT);
+    await two.close();
+  });
+
+  it("zeroes the key when open() fails, instead of leaving it live", async () => {
+    const first = store(WalletStore.generateKey());
+    const { workingFile } = await first.open();
+    writeFileSync(workingFile, PLAINTEXT);
+    await first.close();
+
+    const wrong = store(WalletStore.generateKey());
+    await expect(wrong.open()).rejects.toThrow(/did not decrypt/);
+    // The key is gone, so nothing can be sealed with it any more. (Put a working
+    // file back first, or save() would refuse for the other reason.)
+    writeFileSync(wrong.paths.workingFile, PLAINTEXT);
+    await expect(wrong.save()).rejects.toThrow(/has no key/);
+  });
+
   it("refuses to be opened twice", async () => {
     const one = store(WalletStore.generateKey());
     await one.open();
@@ -147,7 +181,58 @@ describe("encrypted mode", () => {
   });
 });
 
+describe("a plaintext wallet already on disk", () => {
+  it("is seen by exists(), so nothing reports an empty directory", async () => {
+    // It used to be invisible: exists() looked only at the ciphertext, so
+    // openOrCreate reported existed:false, ran init_new, and the addon wrote a
+    // NEW SEED over a funded wallet's file and sealed it.
+    const key = WalletStore.generateKey();
+    const target = store(key);
+    await mkdir(target.paths.chainDir, { recursive: true });
+    writeFileSync(target.paths.workingFile, PLAINTEXT);
+    expect(await target.exists()).toBe(true);
+  });
+
+  it("is adopted and sealed in place, not replaced", async () => {
+    const key = WalletStore.generateKey();
+    const first = store(key);
+    await mkdir(first.paths.chainDir, { recursive: true });
+    writeFileSync(first.paths.workingFile, PLAINTEXT);
+
+    const paths = await first.open();
+    // Still there, unchanged, where the addon expects it.
+    expect(readFileSync(paths.workingFile, "utf8")).toBe(PLAINTEXT);
+    // And already sealed, before anything else can touch it.
+    expect(existsSync(paths.encryptedFile!)).toBe(true);
+    await first.close();
+
+    const second = store(key);
+    const again = await second.open();
+    expect(readFileSync(again.workingFile, "utf8")).toBe(PLAINTEXT);
+    await second.close();
+  });
+});
+
 describe("recovery after a crash", () => {
+  it("keeps a working file whose mtime only EQUALS the ciphertext's", async () => {
+    // Coarse filesystem timestamps make this the common case after a fast crash,
+    // and `>` threw away the only copy of what the wallet had learned.
+    const key = WalletStore.generateKey();
+    const first = store(key);
+    const { workingFile, encryptedFile } = await first.open();
+    writeFileSync(workingFile, PLAINTEXT);
+    await first.close();
+
+    writeFileSync(workingFile, `${PLAINTEXT} — and one more block scanned`);
+    const when = (await stat(encryptedFile!)).mtime;
+    await utimes(workingFile, when, when);
+
+    const second = store(key);
+    const paths = await second.open();
+    expect(readFileSync(paths.workingFile, "utf8")).toContain("one more block scanned");
+    await second.close();
+  });
+
   it("keeps the working file when it is newer than the ciphertext", async () => {
     const key = WalletStore.generateKey();
     const first = store(key);

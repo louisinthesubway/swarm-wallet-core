@@ -508,10 +508,10 @@ Rules:
 
 ---
 
-## 8. The two limitations to design around
+## 8. The three limitations to design around
 
-Both are real, both are in this package's tests, and neither should be discovered
-by a user.
+All three are real, all three are in this package's tests, and none should be
+discovered by a user.
 
 **1. `parse_address` cannot decode SWARM production addresses.** The addon tries
 `ChainType::Mainnet`, `Testnet` and `Regtest` and no more, because an address
@@ -529,6 +529,22 @@ that does and does not protect. **Consequence for the UI:** close the wallet whe
 the pane is left and the app is idle, not only on quit, so the window in which
 plaintext exists is the window in which the user is actually using the wallet.
 `wallet.close()` is idempotent and cheap.
+
+**3. The server's genesis is not verified.** `info_server` builds its JSON by hand
+from zingolib's `ServerInfo` — `version`, `git_commit`, `server_uri`, `vendor`,
+`taddr_support`, `chain_name`, `sapling_activation_height`,
+`consensus_branch_id`, `latest_block_height` — and there is no genesis hash in it.
+So the profile holds SWARM's genesis, the wallet threads it into the chain hint
+(which is what makes the addon build the right `ChainType`), and nothing ever
+compares it with what the indexer reports. `ServerInfo.genesisVerified` is
+therefore always false. The chain label IS compared, and a mismatch refuses the
+open.
+
+**Consequence for the messenger:** the wallet pane must not claim the server is
+verified. And the fix belongs upstream: a `genesis_hash` field in
+`info_server`'s JSON (the indexer's `GetLightdInfo` is where it would come from)
+would close it in one line here. Until then, treat "is this the real SWARM
+indexer" as answered by TLS and the hostname, not by the chain.
 
 ---
 
@@ -570,3 +586,7 @@ Milestone M3 in the plan is items 4 to 7.
    SWARM mobile wallet uses), but the bridge is JNI / Swift and not neon, so the
    TypeScript API in this package does not carry across. Is one shared Rust core
    with three bridges the plan, or three wallets?
+6. **A genesis in `info_server`?** §8.3. Adding `genesis_hash` to the addon's
+   `info_server` JSON is a small change in `privacy-wallet`'s `native/src/lib.rs`
+   and it would let every SWARM client refuse an indexer that is on another chain
+   of the same name. Worth an upstream commit, or accepted as it is?
