@@ -224,8 +224,14 @@ describe("recovery after a crash", () => {
     await first.close();
 
     writeFileSync(workingFile, `${PLAINTEXT} — and one more block scanned`);
-    const when = (await stat(encryptedFile!)).mtime;
+    // BOTH files, to the same explicit instant. Copying the ciphertext's own
+    // mtime is not enough: Linux keeps nanoseconds while `stat().mtime` is a
+    // millisecond Date, so the copy lands a fraction of a millisecond EARLIER and
+    // the case under test never happens. That is how this passed on Windows and
+    // failed on the CI runner.
+    const when = new Date(Math.floor((await stat(encryptedFile!)).mtimeMs));
     await utimes(workingFile, when, when);
+    await utimes(encryptedFile!, when, when);
 
     const second = store(key);
     const paths = await second.open();
