@@ -9,9 +9,17 @@
  *
  *   name = "swarm-wallet-core-native"  →  name = "zingolib-native"
  *
- * If that rename no longer round-trips, the file has other changes in it and
- * this refuses, which is the point: `native/` is copied code, and a silent edit
- * to copied code is how a wallet stops being the wallet that was audited.
+ * `native/Cargo.lock` needs one more step, because cargo keeps `[[package]]`
+ * blocks sorted by name: renaming the root crate moves it from between
+ * `zingolib` and `zip32` to between `subtle` and `syn`, and the first
+ * `cargo build` re-sorts the file — which then fails the workflow's
+ * `git diff --exit-code -- native/Cargo.lock`. So the block is moved in the
+ * committed file, and this check sorts the blocks back before hashing. The
+ * inverse was verified to reproduce the wallet's lock byte for byte.
+ *
+ * If either transform no longer round-trips, the file has other changes in it
+ * and this refuses, which is the point: `native/` is copied code, and a silent
+ * edit to copied code is how a wallet stops being the wallet that was audited.
  *
  * Exit 0 when everything matches. Exit 1, with a list, when it does not.
  */
@@ -32,6 +40,29 @@ const RENAMED_TO = 'name = "zingolib-native"';
 
 /** Files this package added under native/ and which the wallet never had. */
 const OURS = new Set(["native/PROVENANCE.md", "native/PROVENANCE-FILES.tsv"]);
+
+/**
+ * A `Cargo.lock` with its `[[package]]` blocks back in cargo's own order, which
+ * is by name. Reproduces the wallet's file exactly once the rename is undone.
+ */
+const sortLockPackages = (text) => {
+  const start = text.indexOf("[[package]]");
+  if (start < 0) return text;
+  const header = text.slice(0, start);
+  const blocks = text.slice(start).split("\n\n");
+  const nameOf = (block) => {
+    const match = /^name = "(.*?)"$/m.exec(block);
+    if (!match) throw new Error("a [[package]] block in Cargo.lock has no name");
+    return match[1];
+  };
+  return (
+    header +
+    blocks
+      .slice()
+      .sort((a, b) => (nameOf(a) < nameOf(b) ? -1 : nameOf(a) > nameOf(b) ? 1 : 0))
+      .join("\n\n")
+  );
+};
 
 const walk = async (dir) => {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -79,7 +110,9 @@ const main = async () => {
         problems.push(`${key}: does not carry the renamed crate name; the rename was undone?`);
         continue;
       }
-      bytes = Buffer.from(text.replaceAll(RENAMED_FROM, RENAMED_TO), "utf8");
+      let restored = text.replaceAll(RENAMED_FROM, RENAMED_TO);
+      if (key === "native/Cargo.lock") restored = sortLockPackages(restored);
+      bytes = Buffer.from(restored, "utf8");
     }
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (actual !== expected.sha256) {

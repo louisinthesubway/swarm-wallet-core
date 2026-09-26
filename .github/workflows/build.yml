@@ -173,8 +173,18 @@ jobs:
       - name: Build the addon
         run: npm run ${{ matrix.script }}
 
+      # A build that rewrites the lock has changed what it resolved, and a CI run
+      # that only says "exit 1" costs another hour to find out what. The diff is
+      # printed here so the next failure costs one look.
       - name: The lockfile is still clean
-        run: git diff --exit-code -- native/Cargo.lock
+        shell: bash
+        run: |
+          if ! git diff --quiet -- native/Cargo.lock; then
+            echo "cargo rewrote native/Cargo.lock during the build:"
+            git diff -- native/Cargo.lock
+            exit 1
+          fi
+          echo "native/Cargo.lock unchanged by the build"
 
       - name: Save Rust outputs
         if: steps.rust-cache.outputs.cache-hit != 'true'

@@ -31,8 +31,16 @@ with the wallet checkout itself.
 Two files, one edit each, and nothing else:
 
 1. `native/Cargo.toml` — `name = "zingolib-native"` → `name = "swarm-wallet-core-native"`.
-2. `native/Cargo.lock` — the same string in the root package entry, so the lock
-   still resolves without changes (`cargo fetch --locked`).
+2. `native/Cargo.lock` — the same string in the root package entry, **and** the
+   root package's `[[package]]` block moved to where the new name sorts. Cargo
+   keeps that file sorted by name, so the rename moves the block from between
+   `zingolib` and `zip32` to between `subtle` and `syn`; the first `cargo build`
+   would re-sort it and then fail CI's `git diff --exit-code -- native/Cargo.lock`.
+   Moving it in the committed file means the lock still resolves without changes
+   (`cargo fetch --locked`) and stays clean after a build.
+   `scripts/check-provenance.mjs` sorts the blocks back before hashing, and the
+   inverse was verified to reproduce the wallet's lock byte for byte —
+   `9c83820acee7fa78180f2e612da745e33447de5f7e81624278e43358303f9f2e`.
 
 `native/src/lib.rs`, `native/src/lock_discipline_tests.rs`,
 `native/src/macos_auth.m`, `native/build.rs`, `native/BUILD-NOTES-MAINNET.md`

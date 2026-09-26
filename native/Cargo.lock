@@ -3002,6 +3002,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "swarm-wallet-core-native"
+version = "0.1.0"
+dependencies = [
+ "bip0039",
+ "cc",
+ "hex",
+ "http",
+ "json",
+ "lazy_static",
+ "liblzma",
+ "log",
+ "neon",
+ "once_cell",
+ "pepper-sync",
+ "reqwest",
+ "rusqlite",
+ "rustls 0.23.42",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "windows",
+ "zcash_address",
+ "zcash_client_backend",
+ "zcash_encoding",
+ "zcash_keys",
+ "zcash_note_encryption",
+ "zcash_proofs",
+ "zcash_protocol",
+ "zcash_transparent",
+ "zingo-netutils",
+ "zingo_common_components",
+ "zingolib",
+ "zip32",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4312,42 +4348,6 @@ dependencies = [
  "zingo-price",
  "zingo-status",
  "zingo_common_components",
- "zip32",
-]
-
-[[package]]
-name = "swarm-wallet-core-native"
-version = "0.1.0"
-dependencies = [
- "bip0039",
- "cc",
- "hex",
- "http",
- "json",
- "lazy_static",
- "liblzma",
- "log",
- "neon",
- "once_cell",
- "pepper-sync",
- "reqwest",
- "rusqlite",
- "rustls 0.23.42",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "windows",
- "zcash_address",
- "zcash_client_backend",
- "zcash_encoding",
- "zcash_keys",
- "zcash_note_encryption",
- "zcash_proofs",
- "zcash_protocol",
- "zcash_transparent",
- "zingo-netutils",
- "zingo_common_components",
- "zingolib",
  "zip32",
 ]
 
