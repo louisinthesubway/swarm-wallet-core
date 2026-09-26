@@ -14,6 +14,10 @@ name: Build swarm-wallet-core
 #   * The SDK checkout is read-only and only so the pin check can see which network
 #     the pinned SDK targets; cargo fetches its own copy of the same revision.
 
+# Dispatch, or a tag. Deliberately NOT every push to main: three addon builds is
+# most of an hour of runner time, and a branch trigger spends it again on a commit
+# that only touched a comment — and races the dispatch that was started on purpose.
+# The wallet's own workflows are arranged the same way, for the same reason.
 on:
   workflow_dispatch:
     inputs:
@@ -22,11 +26,8 @@ on:
         type: boolean
         default: true
   push:
-    branches: [main]
-    paths-ignore:
-      - '**/*.md'
-  pull_request:
-    branches: [main]
+    tags:
+      - "swarm-wallet-core-*"
 
 permissions:
   contents: read
@@ -196,36 +197,44 @@ jobs:
             native/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
-      - name: The addon loads and carries the SWARM production chain type
+      # The bare label must be refused and the full hint accepted. This is the bug
+      # that cost the owner the first mainnet wallet creation, and it is checkable
+      # here with no network and — deliberately — with NO SEED PHRASE anywhere:
+      # `wallet_exists` goes through the same `construct_uri_load_config` and so
+      # the same `chain_type_from_hint`, and takes no key material at all. The
+      # project rule is that no recovery words appear in a commit or a log, and a
+      # published BIP-39 test vector is still recovery words.
+      - name: The addon loads and holds the chain-hint contract
         shell: bash
         run: |
           set -euo pipefail
           node -e '
             const addon = require("./native.node");
-            for (const name of ["set_wallet_base_dir","init_new","init_from_seed","init_from_b64","get_balance","send","confirm","parse_address","save_wallet_file","deinitialize"]) {
+            for (const name of ["set_wallet_base_dir","wallet_exists","init_new","init_from_seed","init_from_b64","get_balance","send","confirm","parse_address","save_wallet_file","deinitialize"]) {
               if (typeof addon[name] !== "function") throw new Error("addon has no " + name);
             }
-            // The bare label must be refused and the full hint accepted. This is
-            // the bug that cost the owner the first mainnet wallet creation, and
-            // it is checkable without a network: init_from_seed validates the
-            // chain hint before it dials anything.
-            const seed = "abandon ".repeat(23) + "art";
             const genesis = "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd";
             const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
             const dir = fs.mkdtempSync(path.join(os.tmpdir(), "swc-hint-"));
             if (!addon.set_wallet_base_dir(dir)) throw new Error("set_wallet_base_dir refused");
             let bare = null;
-            try { addon.init_from_seed(seed, 1, "", "swarm-mainnet", "Low", 3, "probe.dat"); }
+            try { addon.wallet_exists("", "swarm-mainnet", "Low", 3, "probe.dat"); }
             catch (e) { bare = String(e.message || e); }
             if (bare === null) throw new Error("the addon accepted the BARE label swarm-mainnet");
             if (!/does not name a network/.test(bare)) throw new Error("unexpected refusal: " + bare);
             console.log("bare label refused, as it must be");
-            addon.deinitialize();
-            // Offline mode (empty server uri) so this needs no network: it proves
-            // the hint builds a ChainType and the wallet file is written.
-            addon.init_from_seed(seed, 1, "", "swarm-mainnet:" + genesis, "Low", 3, "probe.dat");
+            const exists = addon.wallet_exists("", "swarm-mainnet:" + genesis, "Low", 3, "probe.dat");
+            if (exists !== false) throw new Error("wallet_exists answered " + exists + " for an empty directory");
             console.log("full chain hint accepted: swarm-mainnet:" + genesis);
-            addon.deinitialize();
+            // And the genesis is load-bearing: a different one is a different chain.
+            const other = addon.wallet_exists("", "swarm-mainnet:" + "ab".repeat(32), "Low", 3, "probe.dat");
+            if (other !== false) throw new Error("wallet_exists answered " + other + " for another genesis");
+            for (const refused of ["mainnet", "swarm", "swarm-mainnet:", "swarm-mainnet:0", "swarm-mainnet:" + genesis.toUpperCase(), ""]) {
+              let threw = false;
+              try { addon.wallet_exists("", refused, "Low", 3, "probe.dat"); } catch { threw = true; }
+              if (!threw) throw new Error("the addon accepted the hint " + JSON.stringify(refused));
+            }
+            console.log("every malformed hint refused");
             fs.rmSync(dir, { recursive: true, force: true });
           '
 
@@ -256,7 +265,7 @@ jobs:
   live:
     name: Live SWARM mainnet integration test
     needs: addon
-    if: ${{ github.event_name != 'pull_request' && (inputs.run_live_test == null || inputs.run_live_test) }}
+    if: ${{ inputs.run_live_test == null || inputs.run_live_test }}
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
