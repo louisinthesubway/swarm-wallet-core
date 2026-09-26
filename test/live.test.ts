@@ -94,10 +94,22 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
     // The server is the chain it claims. `openOrCreate` already refused if not;
     // this records what it saw.
     const info = await wallet.serverInfo();
-    say(`server reports chain=${info.chainName} genesis=${info.genesisHash} height=${info.blockHeight}`);
+    say(
+      `server reports chain=${info.chainName} height=${info.blockHeight} ` +
+        `branch=${info.consensusBranchId} genesis=${info.genesisHash}`,
+    );
     expect(info.chainName).toBe("swarm-mainnet");
-    expect(info.genesisHash).toBe(SWARM_MAINNET_GENESIS);
+    expect(info.blockHeight).not.toBeNull();
     expect(wallet.server).toBe(SWARM_MAINNET_SERVER);
+
+    // And the limitation, asserted rather than hoped about: `info_server` carries
+    // no genesis hash, so the profile's genesis — which IS threaded into the chain
+    // hint, and is what makes the addon build the right ChainType — is never
+    // compared with what the indexer reports. The first version of this test
+    // expected the hash and failed here, which is the right way to find out.
+    expect(SWARM_MAINNET_GENESIS).toMatch(/^[0-9a-f]{64}$/);
+    expect(info.genesisHash).toBeNull();
+    expect(info.genesisVerified).toBe(false);
 
     const addresses = await wallet.addresses();
     const [receive] = addresses.unified;
