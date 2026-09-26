@@ -221,7 +221,15 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
 
   // ── reading ──────────────────────────────────────────────────────────────
 
-  /** What the wallet holds, in zatoshi. */
+  /**
+   * What the wallet holds, in zatoshi.
+   *
+   * The pool field names have moved across SDK revisions, so several spellings
+   * are read. What this must never do is answer zero because it recognised
+   * nothing: a balance that reads 0 when the wallet is funded is the worst
+   * possible failure of a wallet screen. So a response carrying none of the known
+   * fields is a `malformed-response` throw that names what it did see.
+   */
   async balance(): Promise<Balance> {
     this.#assertOpen();
     const raw = await callAddon<Record<string, unknown>>("get_balance", () =>
@@ -231,6 +239,34 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
       "get_spendable_balance_total",
       () => this.#addon.get_spendable_balance_total(),
     );
+    const recognised = (source: Record<string, unknown>, call: string, names: string[]): void => {
+      if (names.some((name) => source[name] !== undefined && source[name] !== null)) return;
+      throw new SwarmWalletError(
+        "malformed-response",
+        `${call} answered an object this version does not recognise — keys: ` +
+          `[${Object.keys(source).join(", ")}]. Expected at least one of ` +
+          `[${names.join(", ")}]. Refusing rather than reporting a zero balance for a wallet ` +
+          `that may hold funds.`,
+        { call },
+      );
+    };
+    recognised(raw, "get_balance", [
+      "orchard_balance",
+      "orchard",
+      "orchard_value",
+      "sapling_balance",
+      "sapling",
+      "sapling_value",
+      "transparent_balance",
+      "transparent",
+      "transparent_value",
+      "total",
+    ]);
+    recognised(spendable, "get_spendable_balance_total", [
+      "spendable_balance",
+      "spendable",
+      "total",
+    ]);
     const pick = (source: Record<string, unknown>, ...names: string[]): bigint => {
       for (const name of names) {
         if (source[name] !== undefined && source[name] !== null) {

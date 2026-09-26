@@ -29,6 +29,8 @@ export type FakeAddonOptions = {
   readonly sendError?: string;
   /** How many `poll_sync` calls report "not complete" before the run ends. */
   readonly syncPolls?: number;
+  /** Answer `get_balance` with a shape this version does not know. */
+  readonly unknownBalanceShape?: boolean;
 };
 
 /** What the fake recorded, so a test can assert on the arguments it was given. */
@@ -201,6 +203,10 @@ export const createFakeAddon = (
 
     async get_balance(): Promise<string> {
       requireOpen("get_balance");
+      if (options.unknownBalanceShape) {
+        // What a renamed SDK field set would look like from here.
+        return JSON.stringify({ pools: { orchard: 150_000_000 }, unit: "zatoshi" });
+      }
       return JSON.stringify({
         orchard_balance: 150_000_000,
         sapling_balance: 0,

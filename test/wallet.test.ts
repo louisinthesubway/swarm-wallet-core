@@ -206,6 +206,14 @@ describe("reading", () => {
     expect(balance.pendingZat).toBe(50_000_000n);
   });
 
+  it("refuses a balance shape it does not recognise, rather than reporting zero", async () => {
+    // A wallet screen showing 0 SWM for a funded wallet is the worst failure this
+    // package can have, and a renamed SDK field is how it would happen.
+    const { wallet } = await open({ unknownBalanceShape: true });
+    await expect(wallet.balance()).rejects.toThrow(/does not recognise/);
+    await expect(wallet.balance()).rejects.toThrow(/Refusing rather than reporting a zero balance/);
+  });
+
   it("formats the spendable balance for a label", async () => {
     const { wallet } = await open();
     expect(await wallet.balanceText()).toBe("1.5 SWM");
