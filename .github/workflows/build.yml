@@ -253,7 +253,31 @@ jobs:
             shasum -a 256 "artifact/native-${{ matrix.platform }}.node" | tee artifact/SHA256SUMS.txt
           fi
 
-      - uses: actions/upload-artifact@v4
+      # Creates a wallet nobody funds, syncs it against lwd-main.swarm.green:8443,
+      # asserts a swm1 address and a zero balance, and never asks for the seed. No
+      # funds move: nothing here calls send.
+      #
+      # In THIS job, not a job of its own, because a separate job would have to
+      # receive native.node as an artifact — and on 2026-09-26 the organisation's
+      # artifact storage quota was exhausted, so no artifact could be uploaded at
+      # all. The binary is already here; carrying it across a job boundary was
+      # never load-bearing.
+      - name: Create a throwaway mainnet wallet and sync it
+        if: ${{ matrix.platform == 'linux-x64' && (inputs.run_live_test == null || inputs.run_live_test) }}
+        env:
+          SWARM_WALLET_CORE_LIVE: "1"
+        run: npx vitest run test/live.test.ts
+
+      # Non-fatal on purpose. The upload is a convenience — the SHA-256 and the
+      # provenance are in the step above and in the job log, which is what a
+      # release actually cites. On 2026-09-26 this step alone turned three green
+      # addon builds red with "Failed to CreateArtifact: Artifact storage quota has
+      # been hit", and a quota problem in the organisation's billing must not be
+      # reported as a wallet that does not compile. When the quota is free again
+      # the artifacts appear and nothing else changes.
+      - name: Keep the built addon, if there is room for it
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
         with:
           name: swarm-wallet-core-addon-${{ matrix.platform }}
           path: |
@@ -261,32 +285,3 @@ jobs:
             native/Cargo.lock
             sdk/swarm-sdk-pin.json
           retention-days: 30
-
-  live:
-    name: Live SWARM mainnet integration test
-    needs: addon
-    if: ${{ inputs.run_live_test == null || inputs.run_live_test }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22.12.0"
-          cache: npm
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: swarm-wallet-core-addon-linux-x64
-          path: downloaded
-      - name: Put the addon where the test looks for it
-        run: |
-          cp downloaded/artifact/native-linux-x64.node native.node
-          sha256sum native.node
-      # Creates a wallet nobody funds, syncs it against lwd-main.swarm.green:8443,
-      # asserts a swm1 address and a zero balance, and never asks for the seed.
-      # No funds move: nothing in this job calls send.
-      - name: Create a throwaway mainnet wallet and sync it
-        env:
-          SWARM_WALLET_CORE_LIVE: "1"
-        run: npx vitest run test/live.test.ts

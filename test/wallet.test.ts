@@ -107,22 +107,41 @@ describe("openOrCreate", () => {
   });
 
   it("reopens an existing wallet with init_from_b64 rather than creating a second", async () => {
-    const first = await open();
+    const storedKey = key();
+    const first = await open({}, { encryptionKey: storedKey });
     await first.wallet.close();
     openWallets.length = 0;
 
-    const storedKey = key();
-    // A fresh store over the same directory: the file is there, so the second
-    // open must take the existing-wallet path. (A different key would refuse to
-    // decrypt, so the same one is used, which is what the messenger does.)
     const { addon, log } = createFakeAddon();
-    const store = new WalletStore({ dataDir, chain: "swarm-mainnet", encryptionKey: storedKey });
+    const wallet = await SwarmWallet.openOrCreate({
+      addon,
+      dataDir,
+      chain: "swarm-mainnet",
+      encryptionKey: storedKey,
+    });
+    openWallets.push(wallet);
+    expect(log.calls.some((call) => call.name === "init_from_b64")).toBe(true);
+    expect(log.calls.some((call) => call.name === "init_new")).toBe(false);
+    // And the reopen was given the full hint too, not just the creation.
+    expect(argsOf(log, "init_from_b64")?.[1]).toBe(`swarm-mainnet:${SWARM_MAINNET_GENESIS}`);
+  });
+
+  it("refuses a wallet sealed with a different key instead of overwriting it", async () => {
+    const first = await open({}, { encryptionKey: key() });
+    await first.wallet.close();
+    openWallets.length = 0;
+
+    const store = new WalletStore({ dataDir, chain: "swarm-mainnet", encryptionKey: key() });
     expect(await store.exists()).toBe(true);
 
+    const { addon, log } = createFakeAddon();
     await expect(
-      SwarmWallet.openOrCreate({ addon, dataDir, chain: "swarm-mainnet", encryptionKey: storedKey }),
+      SwarmWallet.openOrCreate({ addon, dataDir, chain: "swarm-mainnet", encryptionKey: key() }),
     ).rejects.toThrow(/did not decrypt/);
+    // Nothing was created over it. A lost key loses the file, and the answer is
+    // restore-from-seed, never a new wallet written where the old one was.
     expect(log.calls.some((call) => call.name === "init_new")).toBe(false);
+    expect(SwarmWallet.current()).toBeNull();
   });
 
   it("closes the wallet and refuses when the server reports another chain", async () => {
