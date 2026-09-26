@@ -696,7 +696,10 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     const expectedChain = this.profile?.chainLabel ?? this.chain;
     if (info.chainName && info.chainName !== expectedChain) {
       const actual = info.chainName;
-      await this.close();
+      // The close is best-effort on purpose: whatever goes wrong shutting a
+      // wallet we are refusing anyway, the error the caller must see is the
+      // wrong chain, not a failed save on the way out.
+      await this.close().catch(() => {});
       throw new SwarmWalletError(
         "wrong-chain",
         `${this.server} reports chain "${actual}", not "${expectedChain}". The wallet was closed ` +
@@ -706,7 +709,7 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     const expectedGenesis = this.profile?.genesis;
     if (expectedGenesis && info.genesisHash && info.genesisHash !== expectedGenesis) {
       const actual = info.genesisHash;
-      await this.close();
+      await this.close().catch(() => {});
       throw new SwarmWalletError(
         "wrong-chain",
         `${this.server} reports genesis ${actual}, not ${expectedGenesis}. Same chain name, ` +
