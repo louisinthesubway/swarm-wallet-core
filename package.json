@@ -1,0 +1,44 @@
+{
+  "name": "swarm-wallet-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The SWARM wallet as one package: the Rust/neon addon plus a typed, promise-based TypeScript API, for embedding in the SWARM Messenger apps. Keys never leave the device.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "native.node",
+    "native/PROVENANCE.md",
+    "native/PROVENANCE-FILES.tsv",
+    "sdk/swarm-sdk-pin.json",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "neon": "cargo-cp-artifact -a cdylib swarm-wallet-core-native native.node -- cargo build --release --manifest-path native/Cargo.toml --message-format=json-render-diagnostics",
+    "neon-mac-x64": "cargo-cp-artifact -a cdylib swarm-wallet-core-native native.node -- cargo build --release --target x86_64-apple-darwin --manifest-path native/Cargo.toml --message-format=json-render-diagnostics",
+    "neon-mac-arm64": "cargo-cp-artifact -a cdylib swarm-wallet-core-native native.node -- cargo build --release --target aarch64-apple-darwin --manifest-path native/Cargo.toml --message-format=json-render-diagnostics",
+    "neon-win-x64": "cargo-cp-artifact -a cdylib swarm-wallet-core-native native.node -- cargo build --release --target x86_64-pc-windows-msvc --manifest-path native/Cargo.toml --message-format=json-render-diagnostics",
+    "check:provenance": "node scripts/check-provenance.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "cargo-cp-artifact": "^0.1.9",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

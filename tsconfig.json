@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "strict": true,
+    // Deliberately NOT noUncheckedIndexedAccess / exactOptionalPropertyTypes:
+    // src/addressCheck.ts and src/networkProfiles.ts are ports of wallet files and
+    // are kept line-for-line comparable with their originals, which were written
+    // under the wallet's tsconfig. A port that has to be rewritten to typecheck is
+    // a port nobody can diff against its source.
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": ".",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

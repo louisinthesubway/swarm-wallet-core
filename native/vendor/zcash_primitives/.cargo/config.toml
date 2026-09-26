@@ -1,0 +1,23 @@
+# Applies only to builds of this vendored crate on its own, i.e. when cargo is run
+# from this directory, or from `native/` with:
+#
+#   cargo test --locked --manifest-path vendor/zcash_primitives/Cargo.toml \
+#       --config vendor/zcash_primitives/.cargo/config.toml
+#
+# Without it, a standalone build resolves `zcash_protocol`, `zcash_address` and
+# `zcash_transparent` from crates.io and would silently test against the upstream
+# enums (no `NetworkType::SwarmMain`, no `BranchId::SwarmMain`) instead of the
+# vendored SWARM ones — where it would not even compile, because this crate
+# matches `BranchId` exhaustively.
+#
+# The addon build applies the same patch from native/Cargo.toml's own
+# [patch.crates-io], so this only reproduces that resolution. It is a config file
+# rather than a `[workspace]` + `[patch]` pair inside Cargo.toml (which is what
+# the SDK worktree uses) because `native/` is a package and not a workspace: the
+# two crates vendored before this one carry no `[workspace]` table either, and
+# declaring one inside a path-patched crate risks cargo refusing the build with a
+# workspace-membership error. Keep the two conventions apart.
+[patch.crates-io]
+zcash_protocol = { path = "../zcash_protocol" }
+zcash_address = { path = "../zcash_address" }
+zcash_transparent = { path = "../zcash_transparent" }

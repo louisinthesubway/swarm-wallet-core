@@ -1,0 +1,13 @@
+# Every file is stored and checked out with LF, on every platform.
+#
+# Not cosmetic: native/PROVENANCE-FILES.tsv records the SHA-256 of each copied
+# file as it is in the SWARM wallet, whose own .gitattributes says the same thing.
+# A CRLF checkout on Windows would change every one of those hashes and make
+# scripts/check-provenance.mjs fail on a tree that is in fact correct.
+* text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.node binary

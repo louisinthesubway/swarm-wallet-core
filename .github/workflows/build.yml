@@ -1,0 +1,273 @@
+name: Build swarm-wallet-core
+
+# The recipe is the SWARM wallet's own, from .github/workflows/swarm-wallet-windows.yml
+# and swarm-wallet-unix.yml at privacy-wallet 745c2092, reduced to what this
+# package is: the addon, the TypeScript, the tests. No Electron, no installers.
+#
+# The parts that are not optional, and why:
+#   * Rust exactly 1.96.0 — the version the wallet's four green platform builds used.
+#   * RUSTFLAGS '--cfg zcash_unstable="nu6.3"' — the vendored crates are Ironwood-era;
+#     without it the build resolves a different cfg surface. It must be identical for
+#     the vendored crates and the addon, which an environment variable guarantees.
+#   * protoc on PATH — lightwallet-protocol's `rebuild-proto` feature runs it.
+#   * CARGO_NET_GIT_FETCH_WITH_CLI — the SDK revision is fetched over git.
+#   * The SDK checkout is read-only and only so the pin check can see which network
+#     the pinned SDK targets; cargo fetches its own copy of the same revision.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_live_test:
+        description: 'Run the live SWARM mainnet integration test on Linux'
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_PROFILE_RELEASE_DEBUG: "0"
+  CARGO_PROFILE_RELEASE_LTO: "false"
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.96.0"
+  RUSTFLAGS: '--cfg zcash_unstable="nu6.3"'
+  SWARM_SDK_REV: "d9f1a5b888067724b61b2fae46307ed56b4b1e0a"
+
+jobs:
+  # Everything that can refuse the build in a minute runs before the hour of
+  # compilation, not after it. The wallet's workflows learned this the hard way.
+  typescript:
+    name: TypeScript, tests, provenance
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+      - run: npm ci
+      - name: native/ is byte-identical to the wallet it was copied from
+        run: npm run check:provenance
+      - name: Types
+        run: npm run typecheck
+      - name: Tests, with the addon mocked
+        run: npm test
+      - name: The package builds
+        run: npm run build
+
+  addon:
+    name: addon (${{ matrix.platform }})
+    needs: typescript
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 and not latest: the glibc a binary is built against is the
+          # oldest it will run on, so the older image is what lets the addon load
+          # in an Electron app on 22.04 and 24.04 alike.
+          - platform: linux-x64
+            runner: ubuntu-22.04
+            script: neon
+          - platform: win32-x64
+            runner: windows-2025
+            script: neon-win-x64
+          - platform: darwin-arm64
+            runner: macos-14
+            script: neon-mac-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the pinned SDK revision
+        uses: actions/checkout@v4
+        with:
+          repository: Swarm-Official/privacy-zingolib
+          ref: d9f1a5b888067724b61b2fae46307ed56b4b1e0a
+          path: sdk-source
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+
+      - name: Restore compiled Rust outputs
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: swc-${{ matrix.platform }}-rust196-nu63-${{ hashFiles('native/Cargo.lock', 'native/src/lib.rs', 'sdk/swarm-sdk-pin.json') }}
+          restore-keys: swc-${{ matrix.platform }}-rust196-nu63-
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustc --version
+
+      - name: Install protoc (Linux)
+        if: matrix.platform == 'linux-x64'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: startsWith(matrix.platform, 'darwin')
+        run: brew install protobuf
+
+      - name: Install pinned protoc (Windows)
+        if: startsWith(matrix.platform, 'win32')
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '36.2'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify protoc
+        run: protoc --version
+
+      - run: npm ci
+
+      - name: native/ is byte-identical to the wallet it was copied from
+        run: npm run check:provenance
+
+      - name: The SDK revision the pin names is the one checked out
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd sdk-source
+          head="$(git rev-parse HEAD)"
+          echo "sdk-source HEAD: $head"
+          test "$head" = "$SWARM_SDK_REV"
+          # The SwarmMainnet profile must exist in the SDK this compiles against,
+          # or the chain hint has nothing to build.
+          grep -rq 'SwarmMainnet' zingolib/src/config.rs
+          grep -rq 'SWARM_MAINNET_NAME' zingolib/src/config.rs
+          echo "the pinned SDK carries the SWARM production profile"
+
+      - name: The pin file agrees with the launched network
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e '
+            const pin = require("./sdk/swarm-sdk-pin.json");
+            const expected = "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd";
+            if (pin.commit !== process.env.SWARM_SDK_REV) throw new Error("pin commit != workflow SWARM_SDK_REV");
+            if (pin.mainnet.genesis !== expected) throw new Error("pin mainnet genesis is not the launched genesis");
+            if (pin.mainnet.chainHint !== "swarm-mainnet:" + expected) throw new Error("pin chain hint is wrong");
+            console.log("pin agrees: " + pin.mainnet.chainHint);
+          '
+
+      - name: The lockfile resolves without changes
+        run: cargo fetch --locked --manifest-path native/Cargo.toml
+
+      - name: Build the addon
+        run: npm run ${{ matrix.script }}
+
+      - name: The lockfile is still clean
+        run: git diff --exit-code -- native/Cargo.lock
+
+      - name: Save Rust outputs
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      - name: The addon loads and carries the SWARM production chain type
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e '
+            const addon = require("./native.node");
+            for (const name of ["set_wallet_base_dir","init_new","init_from_seed","init_from_b64","get_balance","send","confirm","parse_address","save_wallet_file","deinitialize"]) {
+              if (typeof addon[name] !== "function") throw new Error("addon has no " + name);
+            }
+            // The bare label must be refused and the full hint accepted. This is
+            // the bug that cost the owner the first mainnet wallet creation, and
+            // it is checkable without a network: init_from_seed validates the
+            // chain hint before it dials anything.
+            const seed = "abandon ".repeat(23) + "art";
+            const genesis = "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd";
+            const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+            const dir = fs.mkdtempSync(path.join(os.tmpdir(), "swc-hint-"));
+            if (!addon.set_wallet_base_dir(dir)) throw new Error("set_wallet_base_dir refused");
+            let bare = null;
+            try { addon.init_from_seed(seed, 1, "", "swarm-mainnet", "Low", 3, "probe.dat"); }
+            catch (e) { bare = String(e.message || e); }
+            if (bare === null) throw new Error("the addon accepted the BARE label swarm-mainnet");
+            if (!/does not name a network/.test(bare)) throw new Error("unexpected refusal: " + bare);
+            console.log("bare label refused, as it must be");
+            addon.deinitialize();
+            // Offline mode (empty server uri) so this needs no network: it proves
+            // the hint builds a ChainType and the wallet file is written.
+            addon.init_from_seed(seed, 1, "", "swarm-mainnet:" + genesis, "Low", 3, "probe.dat");
+            console.log("full chain hint accepted: swarm-mainnet:" + genesis);
+            addon.deinitialize();
+            fs.rmSync(dir, { recursive: true, force: true });
+          '
+
+      - name: Record the hash of what was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cp native.node "artifact/native-${{ matrix.platform }}.node"
+          git rev-parse HEAD > artifact/source-commit.txt
+          echo "${{ matrix.platform }}" > artifact/platform.txt
+          rustc --version > artifact/rustc.txt
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "artifact/native-${{ matrix.platform }}.node" | tee artifact/SHA256SUMS.txt
+          else
+            shasum -a 256 "artifact/native-${{ matrix.platform }}.node" | tee artifact/SHA256SUMS.txt
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarm-wallet-core-addon-${{ matrix.platform }}
+          path: |
+            artifact/
+            native/Cargo.lock
+            sdk/swarm-sdk-pin.json
+          retention-days: 30
+
+  live:
+    name: Live SWARM mainnet integration test
+    needs: addon
+    if: ${{ github.event_name != 'pull_request' && (inputs.run_live_test == null || inputs.run_live_test) }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: swarm-wallet-core-addon-linux-x64
+          path: downloaded
+      - name: Put the addon where the test looks for it
+        run: |
+          cp downloaded/artifact/native-linux-x64.node native.node
+          sha256sum native.node
+      # Creates a wallet nobody funds, syncs it against lwd-main.swarm.green:8443,
+      # asserts a swm1 address and a zero balance, and never asks for the seed.
+      # No funds move: nothing in this job calls send.
+      - name: Create a throwaway mainnet wallet and sync it
+        env:
+          SWARM_WALLET_CORE_LIVE: "1"
+        run: npx vitest run test/live.test.ts

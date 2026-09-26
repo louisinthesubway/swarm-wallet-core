@@ -1,0 +1,8 @@
+node_modules/
+native/target/
+native.node
+*.node
+dist/
+.cache/
+.tmp/
+coverage/

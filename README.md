@@ -1,0 +1,137 @@
+# swarm-wallet-core
+
+The SWARM wallet as one embeddable package: the Rust/neon addon from the SWARM
+desktop wallet, plus a typed, promise-based TypeScript API over it, for the SWARM
+Messenger apps.
+
+**The keys live on the device.** There is no server-side wallet here and no code
+path that sends a seed, a spending key or a viewing key anywhere. The messenger
+holds the wallet file; the messenger's server never sees it.
+
+| | |
+| --- | --- |
+| Network | SWARM mainnet — chain label `swarm-mainnet`, ticker `SWM` |
+| Genesis | `01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd` |
+| Indexer | `lwd-main.swarm.green:8443` (TLS) |
+| Addresses | unified `swm1…`, transparent `s1…` / `s3…`, TEX `texswm1…` |
+| Addon source | `Swarm-Official/privacy-wallet` @ `745c2092`, copied byte for byte — see [`native/PROVENANCE.md`](native/PROVENANCE.md) |
+| SDK | `Swarm-Official/privacy-zingolib` @ `d9f1a5b8…`, by revision — see [`sdk/swarm-sdk-pin.json`](sdk/swarm-sdk-pin.json) |
+
+## Using it
+
+```ts
+import { SwarmWallet, WalletStore, loadNativeAddon } from "swarm-wallet-core";
+
+const addon = loadNativeAddon("/path/to/native.node");
+
+const wallet = await SwarmWallet.openOrCreate({
+  addon,
+  dataDir: "/…/userData/swarm-wallet/<accountId>",
+  chain: "swarm-mainnet",
+  encryptionKey: keyFromSafeStorage(),   // 32 bytes, or omit for plaintext
+});
+
+wallet.on("status", ({ progress }) => showProgress(progress));
+await wallet.sync();
+
+const { spendableZat } = await wallet.balance();      // bigint zatoshi
+const [receive] = (await wallet.addresses()).unified; // swm1…
+
+const quote = await wallet.proposeSend({ to: recipient, amountZat: 100_000n, memo: "coffee" });
+showFee(quote.feeZat);          // nothing has been transmitted yet
+const { txids } = await quote.confirm();
+
+await wallet.close();           // saves, seals, wipes the plaintext
+```
+
+### The API
+
+| | |
+| --- | --- |
+| `SwarmWallet.openOrCreate(options)` | Opens the wallet in `dataDir`, creating one if there is none. Creation needs the network: the addon derives the birthday from the chain tip. |
+| `SwarmWallet.restoreFromSeed(options)` | Restores a BIP-39 phrase. Refuses if a wallet already exists in `dataDir`. |
+| `wallet.balance()` / `balanceText()` | `bigint` zatoshi, total and spendable apart; or one formatted string. |
+| `wallet.addresses()` / `newAddress(receivers?)` | Unified and transparent lists; a new unified address (all three receivers by default). |
+| `wallet.proposeSend(request)` → `SendQuote` | Builds the proposal and returns its fee. **Transmits nothing.** `quote.confirm()` transmits. |
+| `wallet.send({…, maxFeeZat})` | Propose and confirm in one call, refusing above a fee ceiling. |
+| `wallet.sync({signal?})` + `status` / `synced` / `sync-error` events | One run to the chain tip, polling the addon as it goes. |
+| `wallet.transactions()` | Value transfers, signed: negative when value left the wallet. |
+| `wallet.parseAddress(address)` | Verdict plus `decodedBy: "addon" \| "prefix"` — read the note below. |
+| `wallet.seedPhrase()` | The seed, only when asked for by name. Nothing else in this package reads it. |
+| `wallet.close()` | Saves, drops the addon's wallet, seals the file, wipes the plaintext. Idempotent. |
+| `formatSwm` / `parseSwm` | zatoshi ⇄ decimal SWM. Truncates towards zero; refuses a ninth decimal. |
+
+Amounts are `bigint` zatoshi throughout. 100,000,000 zatoshi = 1 SWM.
+
+## Three things to know before building on it
+
+**One wallet per process.** The addon keeps a single global `LightClient`
+(`native/src/lib.rs`, `static LIGHTCLIENT: RwLock<Option<LightClient>>`). There is
+no handle, so a second `openOrCreate` in the same process would replace the first
+wallet under its owner's feet. It is refused. Two accounts, two processes.
+
+**The chain hint is not the chain label.** `ChainType::SwarmMainnet` carries the
+genesis hash and the SDK gives it no default, so the addon must be given
+`swarm-mainnet:<64 hex>` and refuses the bare label. Every call goes through
+`nativeChainHint()`; the branded `ChainHint` type stops a label typechecking and
+`test/chainHint.test.ts` reads this package's own source in case someone casts
+around the brand. On 2026-09-26 the same bug in the desktop wallet stopped the
+owner creating a mainnet wallet at all.
+
+**`parseAddress` tells you who decided.** The addon's `parse_address` decodes
+against Zcash `main`, `test` and `regtest` only, because an address string cannot
+supply the genesis a `SwarmMainnet` chain type needs — so it answers
+`Invalid address` for a perfectly good `swm1…`. This package therefore runs its
+own HRP and version-byte check (`src/addressCheck.ts`, ported from the wallet) and
+reports `decodedBy: "prefix"` when that is the strongest answer available. It is
+a real limitation, stated rather than papered over.
+
+## Wallet file protection
+
+The addon writes a **plaintext** wallet file — seed and spending keys in the
+clear. `WalletStore` keeps that file encrypted at rest with AES-256-GCM under a
+32-byte key the caller supplies (in the messenger, from Electron `safeStorage`,
+i.e. the OS keychain). The honest limit: **while the wallet is open its plaintext
+is on disk**, because the addon can read nothing else. `close()` overwrites,
+truncates and unlinks it. See the long comment at the top of
+[`src/walletStore.ts`](src/walletStore.ts) for exactly what that protects against
+and what it does not, including the copy-on-write caveat.
+
+With no key, the file is left in plaintext and `store.encrypted` is `false`. That
+is the desktop wallet's current behaviour, kept available so a caller with nowhere
+to put a key is not given a false sense of one.
+
+## Building the addon
+
+There is no Rust toolchain on the development workstation, so the addon is built
+in CI on three platforms: `.github/workflows/build.yml`. Locally:
+
+```sh
+npm ci
+npm run typecheck && npm test     # no addon needed; it is mocked
+npm run neon                      # needs Rust 1.96.0 and protoc; writes ./native.node
+SWARM_WALLET_CORE_LIVE=1 npx vitest run test/live.test.ts
+```
+
+The pieces that are not optional — Rust exactly `1.96.0`,
+`RUSTFLAGS='--cfg zcash_unstable="nu6.3"'`, `protoc` on PATH — and why, are in
+[`native/PROVENANCE.md`](native/PROVENANCE.md) and, at length, in
+`native/BUILD-NOTES-MAINNET.md` (the wallet's own note, copied unchanged).
+
+`npm run check:provenance` checks every file under `native/` against the SHA-256
+of the wallet file it was copied from. CI runs it before anything compiles.
+
+## Documents
+
+* [`docs/MESSENGER-INTEGRATION.md`](docs/MESSENGER-INTEGRATION.md) — the design
+  for Signal-Desktop: loading the addon in the main process, the `swarm-wallet:*`
+  IPC surface, where the wallet directory lives, `safeStorage` key handling, the
+  wallet pane, and the proposed in-chat payment message and address exchange.
+  It says, per section, what is proposed and what is implemented.
+* [`docs/CI-PROOF-2026-09-26.md`](docs/CI-PROOF-2026-09-26.md) — the CI runs, the
+  `native.node` hashes, and what each run proved.
+
+## Licence
+
+MIT, as the wallet it is copied from. `native/vendor/` carries its own
+`LICENSE-APACHE` / `LICENSE-MIT` pairs, unchanged.
