@@ -101,6 +101,22 @@ With no key, the file is left in plaintext and `store.encrypted` is `false`. Tha
 is the desktop wallet's current behaviour, kept available so a caller with nowhere
 to put a key is not given a false sense of one.
 
+## Getting the addon
+
+CI publishes `native-linux-x64.node`, `native-win32-x64.node` and
+`native-darwin-arm64.node` to a **GitHub Release** in this repository, with a
+`.sha256` beside each one and a `SHA256SUMS.txt` computed by reading the three
+binaries back out of the release. Verify before you load one:
+
+```sh
+gh release download swarm-wallet-core-0.1.0-m1 -R Swarm-Official/swarm-wallet-core
+sha256sum -c SHA256SUMS.txt
+```
+
+A release and not the artifact store, because on 2026-09-26 the organisation's
+Actions artifact quota was exhausted and no artifact could be uploaded at all.
+The artifact upload is still there, non-fatal, and reappears when the quota does.
+
 ## Building the addon
 
 There is no Rust toolchain on the development workstation, so the addon is built

@@ -25,12 +25,23 @@ on:
         description: 'Run the live SWARM mainnet integration test on Linux'
         type: boolean
         default: true
+      release_tag:
+        description: 'Release to publish the three native.node binaries to'
+        type: string
+        default: 'swarm-wallet-core-0.1.0-m1'
   push:
     tags:
-      - "swarm-wallet-core-*"
+      # Deliberately NOT the `swarm-wallet-core-*` pattern: this workflow CREATES a
+      # tag of that shape when it publishes the release below, and a workflow that
+      # triggers itself is a workflow nobody can reason about.
+      - "build-*"
 
+# `write`, because the addon binaries are published to a GitHub Release rather than
+# to the artifact store: on 2026-09-26 the organisation's artifact quota was
+# exhausted (swarm-node's private-repo artifacts alone exceed the free tier), and
+# the messenger still has to be able to fetch a native.node it can trust.
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -247,11 +258,46 @@ jobs:
           git rev-parse HEAD > artifact/source-commit.txt
           echo "${{ matrix.platform }}" > artifact/platform.txt
           rustc --version > artifact/rustc.txt
+          # Per platform, not one SHA256SUMS.txt: three jobs run in parallel and
+          # would each claim the same release asset name.
+          sums="artifact/native-${{ matrix.platform }}.node.sha256"
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "artifact/native-${{ matrix.platform }}.node" | tee artifact/SHA256SUMS.txt
+            ( cd artifact && sha256sum "native-${{ matrix.platform }}.node" ) | tee "$sums"
           else
-            shasum -a 256 "artifact/native-${{ matrix.platform }}.node" | tee artifact/SHA256SUMS.txt
+            ( cd artifact && shasum -a 256 "native-${{ matrix.platform }}.node" ) | tee "$sums"
           fi
+
+      # The addon binaries go to a GitHub Release, which is the only place in this
+      # organisation that can still hold them: the artifact store is over quota. The
+      # release is in a private repository, so it is no more public than the
+      # artifacts were, and `gh release upload --clobber` makes a re-run idempotent.
+      #
+      # `create ... || true` because three matrix jobs race here and exactly one of
+      # them wins; the losers find the release already there and upload into it.
+      - name: Publish the addon to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag || 'swarm-wallet-core-0.1.0-m1' }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            notes="The SWARM wallet addon, built from native/ (copied byte for byte from"
+            notes="$notes privacy-wallet 745c2092) against SDK $SWARM_SDK_REV with Rust 1.96.0"
+            notes="$notes and RUSTFLAGS --cfg zcash_unstable=\"nu6.3\". A per-platform SHA-256"
+            notes="$notes file sits beside each binary, and SHA256SUMS.txt is added once all"
+            notes="$notes three are up. Unsigned, and not a wallet release."
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "swarm-wallet-core addon - $TAG" \
+              --prerelease \
+              --notes "$notes" || true
+          fi
+          gh release upload "$TAG" \
+            "artifact/native-${{ matrix.platform }}.node" \
+            "artifact/native-${{ matrix.platform }}.node.sha256" \
+            --clobber
+          echo "published native-${{ matrix.platform }}.node to release $TAG"
 
       # Creates a wallet nobody funds, syncs it against lwd-main.swarm.green:8443,
       # asserts a swm1 address and a zero balance, and never asks for the seed. No
@@ -285,3 +331,52 @@ jobs:
             native/Cargo.lock
             sdk/swarm-sdk-pin.json
           retention-days: 30
+
+  # Reads the three binaries back OUT of the release and hashes them there. That
+  # makes the sums a check of what was actually published, not a copy of what each
+  # runner said it had, and it is the one place all three platforms meet now that
+  # the artifact store cannot be used.
+  sums:
+    name: SHA256SUMS on the release
+    needs: addon
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Hash what the release actually holds
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag || 'swarm-wallet-core-0.1.0-m1' }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p dl && cd dl
+          gh release download "$TAG" --pattern 'native-*.node' --clobber
+          ls -l
+          sha256sum native-*.node | tee SHA256SUMS.txt
+          count="$(wc -l < SHA256SUMS.txt)"
+          # Said out loud rather than inferred from a missing line: a release with
+          # two binaries in it is not the release the messenger should build against,
+          # and the notes are where anyone looks first.
+          if [ "$count" -lt 3 ]; then
+            warning="**Incomplete: $count of 3 platforms published.** A platform build failed; see the run."
+          else
+            warning="All three platforms published."
+          fi
+          {
+            echo "### native.node, as published"
+            echo
+            echo "$warning"
+            echo
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+            echo
+            echo "Source commit \`$GITHUB_SHA\`. Rust 1.96.0, RUSTFLAGS \`--cfg zcash_unstable=\"nu6.3\"\`,"
+            echo "SDK \`$SWARM_SDK_REV\`, addon source copied byte for byte from privacy-wallet \`745c2092\`."
+            echo "Unsigned. Verify with \`sha256sum -c SHA256SUMS.txt\`."
+          } > notes.md
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+          gh release edit "$TAG" --notes-file notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
