@@ -477,23 +477,25 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
   /**
    * What the server says it is.
    *
-   * `genesisHash` is **always null through this addon**, and `genesisVerified` is
-   * therefore always false. `info_server` builds its JSON by hand from
-   * zingolib's `ServerInfo` and the fields it carries are `version`,
-   * `git_commit`, `server_uri`, `vendor`, `taddr_support`, `chain_name`,
-   * `sapling_activation_height`, `consensus_branch_id`, `latest_block_height` —
-   * no genesis. So "is this really SWARM mainnet and not another chain calling
-   * itself that" is answered by the chain label, the consensus branch id and the
-   * sapling activation height, and not by the hash the profile holds. Closing
-   * that gap needs a new addon entry point; it is an open question in
-   * docs/MESSENGER-INTEGRATION.md rather than a silent hole.
+   * `info_server` builds its JSON by hand from zingolib's `ServerInfo`. Since
+   * wallet `a963fd8c` (SDK `swarm-sdk-mainnet-1`) that includes `genesis_hash`,
+   * the height-zero block hash the indexer states through
+   * `LightdInfo.genesisHash` (proto field 19), so "is this really SWARM mainnet
+   * and not another chain calling itself that" is answered by the hash and not
+   * only by the label. An indexer built before the field answers the empty
+   * string; that is "did not say", read as `null`, and `genesisVerified` stays
+   * false without anything being refused. Through the 0.1.x addon the field did
+   * not exist at all.
    */
   async serverInfo(): Promise<ServerInfo> {
     this.#assertOpen();
     const raw = await callAddon<Record<string, unknown>>("info_server", () =>
       this.#addon.info_server(),
     );
-    const genesisHash = stringOrNull(raw["genesis_hash"] ?? raw["genesisHash"]);
+    const stated = stringOrNull(raw["genesis_hash"] ?? raw["genesisHash"]);
+    // "" is the SDK's "the server did not state one" — never a genesis, never a
+    // mismatch. Lower-cased because the profile's hash is, and hex has no case.
+    const genesisHash = stated === null || stated.trim() === "" ? null : stated.trim().toLowerCase();
     return {
       chainName: stringOr(raw["chain_name"] ?? raw["chainName"], ""),
       genesisHash,
@@ -985,13 +987,11 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
           `synced: scanning the wrong chain writes its state over the right one.`,
       );
     }
-    // The genesis half cannot be done through this addon. `info_server` builds
-    // its JSON by hand and carries no genesis_hash (see NativeAddon.info_server),
-    // so `info.genesisHash` is always null and this comparison never fires
-    // today. It is kept, and its emptiness is written down, because the
-    // alternative — deleting it — would leave nothing to say that "same chain
-    // name, different chain" is an unchecked risk. `genesisVerified` on
-    // ServerInfo is what a caller should read before it trusts a balance.
+    // The genesis half. Since the addon at `a963fd8c` `info_server` carries the
+    // hash the indexer states, so this fires for real: a server on another chain
+    // with the same label is refused before anything syncs. A server that states
+    // no genesis (`info.genesisHash` null) is not refused — the label check above
+    // is then all there is, and `ServerInfo.genesisVerified` says so to the caller.
     const expectedGenesis = this.profile?.genesis;
     if (expectedGenesis && info.genesisHash && info.genesisHash !== expectedGenesis) {
       throw new SwarmWalletError(

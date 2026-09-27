@@ -193,26 +193,42 @@ describe("openOrCreate", () => {
     expect(SwarmWallet.current()).toBeNull();
   });
 
-  it("refuses another genesis IF the addon ever reports one", async () => {
+  it("refuses a server on another chain with the same name, by its genesis", async () => {
+    // Since a963fd8c the addon states the indexer's genesis, so this fires for
+    // real: the chain label alone could not tell a rehearsal chain from mainnet.
     const { addon } = createFakeAddon({ serverGenesis: "ff".repeat(32) });
     await expect(
       SwarmWallet.openOrCreate({ addon, dataDir, chain: "swarm-mainnet", encryptionKey: key() }),
     ).rejects.toThrow(/Same chain name, different chain/);
+    expect(SwarmWallet.current()).toBeNull();
   });
 
-  it("says plainly that the genesis is NOT verified, because the addon reports none", async () => {
-    // The honest state of the world. info_server builds its JSON by hand and
-    // carries no genesis_hash, so the guard above cannot fire in production. A
-    // caller that needs to know reads genesisVerified; the previous version had
-    // a guard that looked tested only because the fake invented a field.
+  it("reports the genesis as verified when the indexer states the profile's", async () => {
     const { wallet } = await open();
     const info = await wallet.serverInfo();
     expect(info.chainName).toBe("swarm-mainnet");
-    expect(info.genesisHash).toBeNull();
-    expect(info.genesisVerified).toBe(false);
+    expect(info.genesisHash).toBe(SWARM_MAINNET_GENESIS);
+    expect(info.genesisVerified).toBe(true);
     // And the height comes from latest_block_height, which is what the addon calls it.
     expect(info.blockHeight).toBe(1000);
     expect(info.consensusBranchId).toBe("c8e71055");
+  });
+
+  it("reads an unstated genesis as null and unverified, never as a mismatch", async () => {
+    // The SDK answers "" for an indexer built before proto field 19. That is
+    // "did not say": the open goes ahead on the label, and genesisVerified says
+    // honestly that the hash was not confirmed.
+    const { wallet } = await open({ serverGenesis: "" });
+    const info = await wallet.serverInfo();
+    expect(info.genesisHash).toBeNull();
+    expect(info.genesisVerified).toBe(false);
+  });
+
+  it("compares the genesis case-insensitively, because hex has no case", async () => {
+    const { wallet } = await open({ serverGenesis: SWARM_MAINNET_GENESIS.toUpperCase() });
+    const info = await wallet.serverInfo();
+    expect(info.genesisHash).toBe(SWARM_MAINNET_GENESIS);
+    expect(info.genesisVerified).toBe(true);
   });
 });
 

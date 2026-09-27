@@ -11,8 +11,9 @@ Local verification: locked Rust1.96 native build with workflow nu6.3 cfg; old re
 ## SWARM production network type (2026-09-25, UNCOMPILED)
 
 Four crates are vendored now, not two, because the SDK revision this addon is
-pinned at — `d9f1a5b888067724b61b2fae46307ed56b4b1e0a` on the SDK branch
-`codex/mainnet-sdk-identity-20260925` — admits `NetworkType::SwarmMain` and
+pinned at — `c7464d2ec40a5d619500a9ebee76ac4c39775baa`, tag `swarm-sdk-mainnet-1`
+on the SDK branch `codex/mainnet-sdk-identity-20260925` (first vendored at its
+parent `d9f1a5b8`) — admits `NetworkType::SwarmMain` and
 `BranchId::SwarmMain`, and two further crates match those enums exhaustively.
 Cargo ignores a dependency's own `[patch]` table, so `native/Cargo.toml` carries
 its own `[patch.crates-io]` for all four.

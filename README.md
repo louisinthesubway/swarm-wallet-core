@@ -14,8 +14,8 @@ holds the wallet file; the messenger's server never sees it.
 | Genesis | `01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd` |
 | Indexer | `lwd-main.swarm.green:8443` (TLS) |
 | Addresses | unified `swm1…`, transparent `s1…` / `s3…`, TEX `texswm1…` |
-| Addon source | `Swarm-Official/privacy-wallet` @ `745c2092`, copied byte for byte — see [`native/PROVENANCE.md`](native/PROVENANCE.md) |
-| SDK | `Swarm-Official/privacy-zingolib` @ `d9f1a5b8…`, by revision — see [`sdk/swarm-sdk-pin.json`](sdk/swarm-sdk-pin.json) |
+| Addon source | `Swarm-Official/privacy-wallet` @ `a963fd8c`, copied byte for byte — see [`native/PROVENANCE.md`](native/PROVENANCE.md) |
+| SDK | `Swarm-Official/privacy-zingolib` @ `c7464d2e…` (tag `swarm-sdk-mainnet-1`), by revision — see [`sdk/swarm-sdk-pin.json`](sdk/swarm-sdk-pin.json) |
 
 ## Using it
 
@@ -86,12 +86,15 @@ own HRP and version-byte check (`src/addressCheck.ts`, ported from the wallet) a
 reports `decodedBy: "prefix"` when that is the strongest answer available. It is
 a real limitation, stated rather than papered over.
 
-**The server's genesis cannot be checked.** `info_server` builds its JSON by hand
-from zingolib's `ServerInfo` and carries no genesis hash, so `ServerInfo.genesisVerified`
-is **always false** and "same chain name, different chain" is a risk this package
-cannot currently rule out. The chain label IS checked, and a mismatch refuses the
-open. Closing the rest needs a new addon entry point; it is an open question in
-the integration doc, not a silent hole.
+**The server's genesis is checked, since 0.2.0.** `info_server` now carries
+`genesis_hash` — the height-zero block hash the indexer serves, through
+`LightdInfo.genesisHash` (proto field 19) in the SDK at `swarm-sdk-mainnet-1` —
+and `openOrCreate` refuses a server whose genesis is not the profile's, so "same
+chain name, different chain" is closed. `ServerInfo.genesisVerified` is true
+against `lwd-main.swarm.green`. An indexer that does not state a genesis answers
+the empty string; that reads as `genesisHash: null` and `genesisVerified: false`,
+never as a mismatch. Through the 0.1.x addon the field did not exist and the flag
+was always false.
 
 ## Wallet file protection
 

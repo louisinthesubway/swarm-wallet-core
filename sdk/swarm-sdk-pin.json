@@ -1,9 +1,10 @@
 {
   "repository": "https://github.com/Swarm-Official/privacy-zingolib",
   "branch": "codex/mainnet-sdk-identity-20260925",
-  "commit": "d9f1a5b888067724b61b2fae46307ed56b4b1e0a",
+  "tag": "swarm-sdk-mainnet-1",
+  "commit": "c7464d2ec40a5d619500a9ebee76ac4c39775baa",
   "commitIsPushed": true,
-  "commitNote": "Pushed. d9f1a5b888067724b61b2fae46307ed56b4b1e0a is the head of branch codex/mainnet-sdk-identity-20260925 in Swarm-Official/privacy-zingolib, confirmed 2026-09-26 against the GitHub API. `cargo fetch` resolves it and actions/checkout can check it out; the four platform CI builds below did both. Its parent ef08aa252ec55f411dc937045548cd4f3f3dc664 is the revision this file named before.",
+  "commitNote": "Pushed. c7464d2ec40a5d619500a9ebee76ac4c39775baa is the commit the tag swarm-sdk-mainnet-1 points at in Swarm-Official/privacy-zingolib (annotated tag object 7c368998), confirmed 2026-09-27 with git ls-remote. It is one commit above d9f1a5b888067724b61b2fae46307ed56b4b1e0a, the revision this file named before: 'SDK: server genesis in info, SWARM address parsing in the CLI, mainnet docs'. It moves the SDK's lightwallet-protocol dependency from zingolabs/lightwallet-protocol-rust 9bdfdc77 to the SWARM fork Swarm-Official/privacy-lightwallet-protocol-rust c9c13e46 (LightdInfo.genesis_hash, field 19), so native/Cargo.toml's [patch.crates-io] pin of that crate moved with it — the two must always name the same revision.",
   "chainName": "swarm-testnet",
   "genesis": "045993f5c91ea160c7ebda573dd97b0016816bca68d395bfff202779b88e2a28",
   "genesisIsPlaceholder": false,
@@ -30,7 +31,8 @@
     "d9f1a5b8 on the build host: zcash_protocol 43 passed, zcash_address 39 unit + 9 doc, zcash_transparent 9, zcash_primitives 54, zingolib --lib 508 passed, cargo check --workspace --tests clean",
     "Linux native addon built against d9f1a5b8 on the mainnet build host (node:24-bookworm container, rustup 1.96.0, RUSTFLAGS='--cfg zcash_unstable=\"nu6.3\"'): `yarn neon` wrote src/native.node; check-swarm-prefix-native.js passed; the JS suite ran 117 suites / 1588 tests, all passing. See native/BUILD-NOTES-MAINNET.md, \"Linux build, verified\".",
     "native/Cargo.lock needed no change: with the SDK resolved, cargo fetch reproduced the hand-edited lock exactly.",
-    "CI GREEN ON FOUR PLATFORMS at wallet commit d08e17e2, 2026-09-26, with the addon compiled against this pin: Windows https://github.com/Swarm-Official/privacy-wallet/actions/runs/36204252054 (windows-wallet), Linux + macOS arm64 + macOS x64 https://github.com/Swarm-Official/privacy-wallet/actions/runs/36204253710."
+    "CI GREEN ON FOUR PLATFORMS at wallet commit d08e17e2, 2026-09-26, with the addon compiled against this pin: Windows https://github.com/Swarm-Official/privacy-wallet/actions/runs/36204252054 (windows-wallet), Linux + macOS arm64 + macOS x64 https://github.com/Swarm-Official/privacy-wallet/actions/runs/36204253710.",
+    "The entries above were verified at d9f1a5b8. For c7464d2e (swarm-sdk-mainnet-1) see native/BUILD-NOTES-MAINNET.md, 'SDK bump to swarm-sdk-mainnet-1'."
   ],
   "mainnet": {
     "state": "LAUNCHED",

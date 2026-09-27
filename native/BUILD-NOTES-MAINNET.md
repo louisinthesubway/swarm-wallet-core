@@ -270,3 +270,69 @@ revision. Update it when a Mac build is verified at `d9f1a5b8`, not before.
 - `node scripts/test.js --watchAll=false`: **117 suites, 1588 tests, all
   passing**, including `src/utils/uris.test.js` (10) against the built addon and
   the four contract suites (77).
+
+## SDK bump to swarm-sdk-mainnet-1, 2026-09-27
+
+The pin moved from `d9f1a5b8` to `c7464d2ec40a5d619500a9ebee76ac4c39775baa`, the
+tag `swarm-sdk-mainnet-1` in `Swarm-Official/privacy-zingolib` (one commit above
+d9f1a5b8: "SDK: server genesis in info, SWARM address parsing in the CLI,
+mainnet docs"). What that commit brings the wallet:
+
+- `ServerInfo.genesis_hash` — the height-zero block hash the indexer serves,
+  from `LightdInfo.genesisHash` (proto field 19), through the SWARM fork
+  `Swarm-Official/privacy-lightwallet-protocol-rust` at `c9c13e46`. Empty when the
+  server does not state one; `lwd-main.swarm.green` (indexer `1121a688`) does.
+- SWARM-aware `parse_address` in the SDK's CLI path.
+
+What moved in this repository, and why each piece:
+
+- `native/Cargo.toml`: the three SDK crates to the new rev, **and** the
+  `[patch.crates-io]` pin of `lightwallet-protocol` from zingolabs `9bdfdc77` to
+  the fork's `c9c13e46`. The SDK's own workspace made the same move; the two must
+  name the same revision, or two `lightwallet-protocol` crates resolve and every
+  gRPC type mismatches.
+- `native/Cargo.lock`: the seven SDK `source =` lines and the one
+  `lightwallet-protocol` line, edited by hand. `cargo +1.96.0 fetch --locked`
+  then resolved with **no change to the lock**, and the builds below rewrote
+  nothing either.
+- `.github/workflows/swarm-wallet-unix.yml`, `swarm-wallet-windows.yml`:
+  `SWARM_SDK_REV` and the SDK checkout `ref`.
+- `sdk/swarm-sdk-pin.json`: `commit`, a `tag` field, the note.
+- `native/src/lib.rs`, `info_server`: one field added to the hand-built JSON,
+  `"genesis_hash": info.genesis_hash`. The renderer's
+  `src/utils/serverIdentity.ts` already read `genesis_hash?` when present and
+  refuses a server whose genesis is not the profile's; until now the addon never
+  gave it one. `RPCInfoType` gains the optional field. **This is the one change
+  here that is not the pin bump itself**; it is a separate commit so it can be
+  judged, or dropped, on its own.
+
+Where it was built: the build host's SSH is refused to the session that did this
+work, so the Linux build ran in the workstation's WSL distro (Ubuntu 24.04,
+rustup `1.96.0`, `libprotoc 3.21.12`, Node `v22.23.3`),
+`RUSTFLAGS='--cfg zcash_unstable="nu6.3"'`, `CARGO_INCREMENTAL=0`,
+`cargo build --release --manifest-path native/Cargo.toml`, the `cdylib` copied to
+`src/native.node` — what `yarn neon` does, without `cargo-cp-artifact`.
+
+- Pin bump alone: built in 3m18s (warm registry), `src/native.node` sha256
+  `6cc60dd2f9de5bd6be9d75c75c67933f7403890e5134ec6d7895ae0f79d08287`
+  (234 MB, `debug = 1` as the profile says). `swarm-wallet-core`'s live checks
+  against that binary on mainnet: chain `swarm-mainnet`, synced 641/641,
+  `swm1…` address, zero balance across the twelve pool keys, 24 recovery words
+  (not printed). `info_server` still had no genesis field, which is what led to
+  the `lib.rs` line above.
+- With `genesis_hash`: rebuilt in 34s (only `zingolib-native` recompiled),
+  `src/native.node` sha256
+  `2a60c23a70b79ad4ed545314c0d983e7e359c966560a79f11e4de6900e5eaa02`. The same
+  live checks now report `genesis=01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd`
+  from `lwd-main.swarm.green`, which is the launch genesis, and the wrapper's
+  wrong-chain comparison ran against it instead of skipping. Synced 644/644.
+- `node scripts/check-swarm-prefix-native.js` against the rebuilt addon: passed.
+- `CI=true node scripts/test.js --watchAll=false` in the same WSL tree
+  (`yarn install --frozen-lockfile --network-timeout 600000`; the first
+  attempt died on `ESOCKETTIMEDOUT` fetching one tarball): **118 suites,
+  1606 passed, 3 skipped, 1609 total**, 21s — the 1606 baseline, including
+  `src/utils/uris.test.js` against the `2a60c23a` addon.
+- Not done here: the Windows and macOS builds, and the four-platform CI run,
+  because the organisation's GitHub Actions are blocked by billing
+  (2026-09-26/27). The `swarm-unix-*` / `swarm-win-*` tag workflows are ready to
+  run once that is lifted.

@@ -154,11 +154,10 @@ export type NativeAddon = {
    * by hand in `lib.rs` because `ServerInfo` does not derive `Serialize`:
    * `version`, `git_commit`, `server_uri`, `vendor`, `taddr_support`,
    * `chain_name`, `sapling_activation_height`, `consensus_branch_id`,
-   * `latest_block_height`.
-   *
-   * **There is no `genesis_hash`.** See `SwarmWallet.serverInfo`: the genesis
-   * half of the server-identity check cannot be done through this addon, and
-   * saying so is better than a guard that silently never fires.
+   * `latest_block_height`, and — since wallet `a963fd8c`, SDK
+   * `swarm-sdk-mainnet-1` — **`genesis_hash`**: the height-zero block hash the
+   * server states, or `""` when it did not state one. `SwarmWallet.serverInfo`
+   * reads `""` as `null`, never as a mismatch.
    */
   info_server(): Promise<string>;
   change_server(server_uri: string): Promise<string>;

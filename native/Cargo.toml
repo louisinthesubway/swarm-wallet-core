@@ -63,20 +63,22 @@ crate-type = ["cdylib"]
 # SwarmTestnet build: the project's SDK fork, pinned by revision rather than
 # reconstructed from a patch snapshot.
 #
-# WARNING: d9f1a5b888067724b61b2fae46307ed56b4b1e0a exists only on the local
-# branch `codex/mainnet-sdk-identity-20260925` in the SDK worktree; it has NOT
-# been pushed to Swarm-Official/privacy-zingolib. Until it is, `cargo fetch`
-# cannot resolve it from the URL below, and neither this crate nor CI will
-# build. Push the SDK branch first. That revision is where
-# `ChainType::SwarmMainnet(SwarmMainnetGenesis)` and the SwarmMain network type
-# come from. By rev and not by branch, so the build
-# stays reproducible (ADR 0024 rule 7); bump it deliberately. The same revision
-# is recorded in sdk/swarm-sdk-pin.json, and scripts/check-swarm-sdk-pin.js
-# checks this file, the lockfile and the pinned SDK's own genesis constant
-# against it before anything is compiled.
-zingolib = { features = ["nym", "perspective"], git = "https://github.com/Swarm-Official/privacy-zingolib", rev = "d9f1a5b888067724b61b2fae46307ed56b4b1e0a" }
-pepper-sync = { git = "https://github.com/Swarm-Official/privacy-zingolib", rev = "d9f1a5b888067724b61b2fae46307ed56b4b1e0a" }
-zingo-netutils = { git = "https://github.com/Swarm-Official/privacy-zingolib", rev = "d9f1a5b888067724b61b2fae46307ed56b4b1e0a" }
+# c7464d2ec40a5d619500a9ebee76ac4c39775baa is the tag `swarm-sdk-mainnet-1` in
+# Swarm-Official/privacy-zingolib (pushed; one commit above d9f1a5b8, the pin
+# before this one). It is where `ChainType::SwarmMainnet(SwarmMainnetGenesis)`
+# and the SwarmMain network type come from, and it adds two things the mainnet
+# indexer already serves: `LightdInfo.genesis_hash` (proto field 19, through
+# the SWARM fork of lightwallet-protocol-rust pinned in [patch.crates-io]
+# below — the fork MUST be the same revision the SDK's own workspace pins, or
+# two `lightwallet-protocol` crates resolve and every gRPC type mismatches) and
+# SWARM-aware `parse_address`. By rev and not by branch, so the build stays
+# reproducible (ADR 0024 rule 7); bump it deliberately. The same revision is
+# recorded in sdk/swarm-sdk-pin.json, and scripts/check-swarm-sdk-pin.js checks
+# this file, the lockfile and the pinned SDK's own genesis constant against it
+# before anything is compiled.
+zingolib = { features = ["nym", "perspective"], git = "https://github.com/Swarm-Official/privacy-zingolib", rev = "c7464d2ec40a5d619500a9ebee76ac4c39775baa" }
+pepper-sync = { git = "https://github.com/Swarm-Official/privacy-zingolib", rev = "c7464d2ec40a5d619500a9ebee76ac4c39775baa" }
+zingo-netutils = { git = "https://github.com/Swarm-Official/privacy-zingolib", rev = "c7464d2ec40a5d619500a9ebee76ac4c39775baa" }
 
 # These must match zingolib's workspace versions exactly, not merely be
 # semver-compatible with them. Two versions of `zcash_keys` resolve to two
@@ -187,7 +189,7 @@ zcash_protocol = { path = "vendor/zcash_protocol" }
 zcash_primitives = { path = "vendor/zcash_primitives" }
 zcash_transparent = { path = "vendor/zcash_transparent" }
 time = { git = "https://github.com/time-rs/time", tag = "v0.3.47" }
-lightwallet-protocol = { git = "https://github.com/zingolabs/lightwallet-protocol-rust", rev = "9bdfdc77eb283f2a3d26c27100cc2ac90148cd93" }
+lightwallet-protocol = { git = "https://github.com/Swarm-Official/privacy-lightwallet-protocol-rust", rev = "c9c13e46bbea726f904f12cb18cd85e57ff46d35" }
 
 [profile.release]
 debug = 1

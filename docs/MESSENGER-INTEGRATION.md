@@ -530,21 +530,20 @@ the pane is left and the app is idle, not only on quit, so the window in which
 plaintext exists is the window in which the user is actually using the wallet.
 `wallet.close()` is idempotent and cheap.
 
-**3. The server's genesis is not verified.** `info_server` builds its JSON by hand
-from zingolib's `ServerInfo` — `version`, `git_commit`, `server_uri`, `vendor`,
-`taddr_support`, `chain_name`, `sapling_activation_height`,
-`consensus_branch_id`, `latest_block_height` — and there is no genesis hash in it.
-So the profile holds SWARM's genesis, the wallet threads it into the chain hint
-(which is what makes the addon build the right `ChainType`), and nothing ever
-compares it with what the indexer reports. `ServerInfo.genesisVerified` is
-therefore always false. The chain label IS compared, and a mismatch refuses the
-open.
+**3. The server's genesis is verified, since 0.2.0.** Through the 0.1.x addon
+`info_server` carried no genesis hash and `ServerInfo.genesisVerified` was
+always false. The fix went upstream as planned: the wallet's SDK moved to
+`swarm-sdk-mainnet-1`, whose `ServerInfo` reads `LightdInfo.genesisHash`
+(proto field 19) through the SWARM fork of the proto crate, and `info_server`
+now writes it as `genesis_hash`. `openOrCreate` refuses a server whose genesis
+is not the profile's ("Same chain name, different chain"), and
+`genesisVerified` is true against `lwd-main.swarm.green`.
 
-**Consequence for the messenger:** the wallet pane must not claim the server is
-verified. And the fix belongs upstream: a `genesis_hash` field in
-`info_server`'s JSON (the indexer's `GetLightdInfo` is where it would come from)
-would close it in one line here. Until then, treat "is this the real SWARM
-indexer" as answered by TLS and the hostname, not by the chain.
+**Consequence for the messenger:** the wallet pane may say the server is
+verified when `genesisVerified` is true, and must say "not stated" (not
+"wrong") when the indexer answers no genesis — that comes back as
+`genesisHash: null`. TLS and the hostname are still what make the transport
+trustworthy; the genesis is what makes the *chain* the right one.
 
 ---
 
@@ -586,7 +585,6 @@ Milestone M3 in the plan is items 4 to 7.
    SWARM mobile wallet uses), but the bridge is JNI / Swift and not neon, so the
    TypeScript API in this package does not carry across. Is one shared Rust core
    with three bridges the plan, or three wallets?
-6. **A genesis in `info_server`?** §8.3. Adding `genesis_hash` to the addon's
-   `info_server` JSON is a small change in `privacy-wallet`'s `native/src/lib.rs`
-   and it would let every SWARM client refuse an indexer that is on another chain
-   of the same name. Worth an upstream commit, or accepted as it is?
+6. ~~**A genesis in `info_server`?**~~ Done upstream on 2026-09-27
+   (`privacy-wallet` `497228d1`, on the SDK tag `swarm-sdk-mainnet-1`) and
+   carried here in 0.2.0; §8.3 records the closed state.

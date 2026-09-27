@@ -227,17 +227,21 @@ export type SendResult = {
 /**
  * What the server says it is.
  *
- * Read `genesisVerified` before trusting a balance. It is **false through this
- * addon, always**: `info_server` builds its JSON by hand and carries no genesis
- * hash, so "same chain name, different chain" is not something this package can
- * currently rule out. Closing that needs a new addon entry point.
+ * Read `genesisVerified` before trusting a balance. Since 0.2.0 the addon's
+ * `info_server` carries `genesis_hash` — the height-zero block hash the indexer
+ * states (SDK `swarm-sdk-mainnet-1`, `LightdInfo.genesisHash` field 19) — and
+ * `openOrCreate` has already refused the server if it named another genesis. So
+ * `true` here means the indexer confirmed the chain the profile holds; `false`
+ * means it did not say (an older indexer answers the empty string), never that
+ * it disagreed. Through the 0.1.x addon the field did not exist and this was
+ * always false.
  */
 export type ServerInfo = {
   /** The chain label the indexer reports. Checked against the wallet's own. */
   readonly chainName: string;
-  /** The genesis the indexer reports, or `null` — which is what it is today. */
+  /** The genesis the indexer states, or `null` when it did not state one. */
   readonly genesisHash: string | null;
-  /** Whether the reported genesis matched the profile's. False when unreported. */
+  /** Whether the stated genesis matched the profile's. False when unstated. */
   readonly genesisVerified: boolean;
   readonly blockHeight: number | null;
   /** The consensus branch id the indexer reports, as it reports it. */

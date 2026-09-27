@@ -1,7 +1,9 @@
 # What the addon really answers
 
-Read out of `native/src/lib.rs` at `745c2092`, which is the copy in this
-repository. **Read this before adding a call to `src/wallet.ts`.**
+Read out of `native/src/lib.rs` at `745c2092`, and re-read at `a963fd8c`, which
+is the copy in this repository since 0.2.0 (the only entry point that changed
+between the two is `info_server`). **Read this before adding a call to
+`src/wallet.ts`.**
 
 It exists because of one afternoon. The wrapper was written against
 `src/native.node.d.ts`, whose every method is `Promise<string>`, and the
@@ -65,12 +67,16 @@ Its argument is a **flag string**, not JSON: the addon reads
 means both. `JSON.stringify({orchard: false, sapling: true})` asks for **orchard
 only**, because that text contains an `o` (inside `"orchard"`) and no `z`.
 
-**`info_server` has no genesis hash.** It builds its JSON by hand, because
-zingolib's `ServerInfo` does not derive `Serialize`, and the nine fields are:
-`version`, `git_commit`, `server_uri`, `vendor`, `taddr_support`, `chain_name`,
-`sapling_activation_height`, `consensus_branch_id`, `latest_block_height`. Not
-`genesis_hash`, and not `block_height`. So `ServerInfo.genesisVerified` is always
-false — see the third limitation in `docs/MESSENGER-INTEGRATION.md`.
+**`info_server` builds its JSON by hand**, because zingolib's `ServerInfo` does
+not derive `Serialize`. At `745c2092` it had nine fields — `version`,
+`git_commit`, `server_uri`, `vendor`, `taddr_support`, `chain_name`,
+`sapling_activation_height`, `consensus_branch_id`, `latest_block_height` — and
+no genesis, so `ServerInfo.genesisVerified` was always false. At `a963fd8c`
+(0.2.0) it has a tenth, **`genesis_hash`**: the height-zero block hash the server
+states (SDK `swarm-sdk-mainnet-1`, `LightdInfo.genesisHash` field 19), or `""`
+when the server did not state one — which a reader must treat as unknown, never
+as a mismatch. `lwd-main.swarm.green` states `01c34428…afdd`. There is still no
+`block_height`; the height is `latest_block_height`.
 
 **`parse_address` cannot decode SWARM addresses.** It tries `ChainType::Mainnet`,
 `Testnet` and `Regtest` only (`make_decoded_chain_pair`), because an address

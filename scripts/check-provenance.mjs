@@ -132,7 +132,7 @@ const main = async () => {
     );
     for (const problem of problems) console.error(`  ${problem}`);
     console.error(
-      "\nnative/ is copied, byte for byte, from Swarm-Official/privacy-wallet at 745c2092.\n" +
+      "\nnative/ is copied, byte for byte, from Swarm-Official/privacy-wallet at a963fd8c.\n" +
         "Changes belong upstream in the wallet, where its own test suite can see them,\n" +
         "and come here as a new copy with a new commit id in native/PROVENANCE.md.",
     );
@@ -140,7 +140,7 @@ const main = async () => {
     return;
   }
 
-  console.log(`native/ matches its provenance: ${seen.size} files, wallet 745c2092.`);
+  console.log(`native/ matches its provenance: ${seen.size} files, wallet a963fd8c.`);
 };
 
 await main();

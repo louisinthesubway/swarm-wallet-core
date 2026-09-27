@@ -102,14 +102,16 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
     expect(info.blockHeight).not.toBeNull();
     expect(wallet.server).toBe(SWARM_MAINNET_SERVER);
 
-    // And the limitation, asserted rather than hoped about: `info_server` carries
-    // no genesis hash, so the profile's genesis — which IS threaded into the chain
-    // hint, and is what makes the addon build the right ChainType — is never
-    // compared with what the indexer reports. The first version of this test
-    // expected the hash and failed here, which is the right way to find out.
+    // The indexer states its genesis (proto field 19, served by lwd-main since
+    // indexer 1121a688) and the addon at a963fd8c passes it through. So the
+    // profile's genesis — which IS threaded into the chain hint, and is what makes
+    // the addon build the right ChainType — is now compared with what the indexer
+    // reports, and openOrCreate would have refused a mismatch above. Through the
+    // 0.1.x addon this asserted null; an addon built from an older native/ fails
+    // here, which is the right way to find out it is the wrong binary.
     expect(SWARM_MAINNET_GENESIS).toMatch(/^[0-9a-f]{64}$/);
-    expect(info.genesisHash).toBeNull();
-    expect(info.genesisVerified).toBe(false);
+    expect(info.genesisHash).toBe(SWARM_MAINNET_GENESIS);
+    expect(info.genesisVerified).toBe(true);
 
     // Before the first sync the plan is empty and nothing has been scanned. Both
     // heights are null — not zero, not a guess.

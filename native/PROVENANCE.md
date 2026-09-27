@@ -7,11 +7,16 @@ here was written for this package except this file and the file list beside it.
 | --- | --- |
 | Source repository | `Swarm-Official/privacy-wallet` (also pushed as `brs-holding/privacy-wallet`) |
 | Branch | `codex/mainnet-wallet-mainnet-20260925` |
-| Commit | `745c2092` — *"Wallet: build the addon's chain hint, never pass a bare SWARM label"* |
-| Local checkout copied from | `C:\Users\o5o-o\swarm-work\codex-mainnet-wallet-mainnet-20260925` |
-| Copied on | 2026-09-26 |
+| Commit | `a963fd8c` — *"Wallet: record the swarm-sdk-mainnet-1 Linux build and the 1606-test run"* |
+| Local checkout copied from | `D:\swarm-work\wallet-sdk-bump` (a worktree of that branch, clean at `a963fd8c`) |
+| Copied on | 2026-09-27 |
 | Files copied | 115 (`native/` minus `native/target/`) |
 | Per-file SHA-256 | [`PROVENANCE-FILES.tsv`](PROVENANCE-FILES.tsv) |
+
+| Copy | Wallet commit | What the wallet changed under `native/` since the previous copy |
+| --- | --- | --- |
+| 2026-09-26 (0.1.0, 0.1.1) | `745c2092` | first copy |
+| 2026-09-27 (0.2.0) | `a963fd8c` | SDK pin `d9f1a5b8` → `c7464d2e` (tag `swarm-sdk-mainnet-1`) with the `lightwallet-protocol` fork `c9c13e46` in `Cargo.toml` / `Cargo.lock`; `src/lib.rs` `info_server` adds `"genesis_hash"`; `vendor/README.md` and `BUILD-NOTES-MAINNET.md` record it |
 
 `PROVENANCE-FILES.tsv` records the SHA-256 of each file **as it was copied**,
 before the two edits listed below. To check a file against the wallet:
@@ -38,14 +43,16 @@ Two files, one edit each, and nothing else:
    would re-sort it and then fail CI's `git diff --exit-code -- native/Cargo.lock`.
    Moving it in the committed file means the lock still resolves without changes
    (`cargo fetch --locked`) and stays clean after a build.
-   `scripts/check-provenance.mjs` sorts the blocks back before hashing, and the
-   inverse was verified to reproduce the wallet's lock byte for byte —
-   `9c83820acee7fa78180f2e612da745e33447de5f7e81624278e43358303f9f2e`.
+   `scripts/check-provenance.mjs` sorts the blocks back before hashing; the
+   table's row for `native/Cargo.lock` is the wallet's own lock hash, and the
+   check passing is the proof that the transform round-trips.
 
 `native/src/lib.rs`, `native/src/lock_discipline_tests.rs`,
 `native/src/macos_auth.m`, `native/build.rs`, `native/BUILD-NOTES-MAINNET.md`
 and all 109 files under `native/vendor/` are **byte-identical** to the wallet at
-`745c2092`.
+`a963fd8c`. The copy is made by a script that hashes the wallet's bytes first
+and applies the two edits after, so a copy can never carry a third edit
+unnoticed.
 
 ## What was NOT removed, and why
 
@@ -68,8 +75,11 @@ comes here as a new copy with a new commit id in this file.
 
 Untouched, in both directions. `zingolib`, `pepper-sync` and `zingo-netutils`
 are fetched by revision from `Swarm-Official/privacy-zingolib`
-(`d9f1a5b888067724b61b2fae46307ed56b4b1e0a`, the revision recorded in
-`sdk/swarm-sdk-pin.json`); the four vendored crates under `native/vendor/` are
+(`c7464d2ec40a5d619500a9ebee76ac4c39775baa`, the tag `swarm-sdk-mainnet-1`, the
+revision recorded in `sdk/swarm-sdk-pin.json`), and `lightwallet-protocol` from
+the SWARM fork `Swarm-Official/privacy-lightwallet-protocol-rust` at `c9c13e46`,
+the same revision the SDK's own workspace pins (it adds `LightdInfo.genesisHash`,
+proto field 19); the four vendored crates under `native/vendor/` are
 the wallet's own copies, whose provenance and archive SHA-256s are in
 [`vendor/README.md`](vendor/README.md). No primitive, no consensus parameter and
 no key derivation in this package differs from the wallet by one byte.

@@ -32,6 +32,7 @@ import { dirname, join } from "node:path";
 
 import type { ChainHint, PerformanceLevel } from "../src/types.js";
 import type { NativeAddon } from "../src/nativeAddon.js";
+import { SWARM_MAINNET_GENESIS } from "../src/networkProfiles.js";
 
 export type FakeAddonOptions = {
   /** Fail `init_new` with this message. */
@@ -39,8 +40,9 @@ export type FakeAddonOptions = {
   /** What `info_server` reports as its chain label. Defaults to swarm-mainnet. */
   readonly serverChain?: string;
   /**
-   * Make `info_server` carry a `genesis_hash`. The real addon carries none, so
-   * this exists only to exercise the guard for the day it does.
+   * What `info_server` reports as `genesis_hash`. Defaults to the launch genesis,
+   * which is what `lwd-main.swarm.green` states through the addon at `a963fd8c`.
+   * `""` is what an indexer that predates the field answers.
    */
   readonly serverGenesis?: string;
   /** Make `save_wallet_file` reject, as a full disk would. */
@@ -464,10 +466,10 @@ export const createFakeAddon = (
 
     async info_server(): Promise<string> {
       requireOpen("info_server");
-      // Exactly the nine fields lib.rs builds by hand. There is NO genesis_hash
-      // and NO block_height; the height is `latest_block_height`. A fake that
-      // invented a genesis made the wrapper's genesis guard look tested when in
-      // production it could never fire.
+      // Exactly the ten fields lib.rs builds by hand at a963fd8c. There is NO
+      // block_height; the height is `latest_block_height`. `genesis_hash` is the
+      // tenth, added upstream on 2026-09-27; an indexer that predates the proto
+      // field comes through as "".
       return JSON.stringify({
         version: "fake",
         git_commit: "0000000",
@@ -478,9 +480,7 @@ export const createFakeAddon = (
         sapling_activation_height: 1,
         consensus_branch_id: "c8e71055",
         latest_block_height: 1000,
-        // Only when a test deliberately asks for it, to exercise the guard that
-        // will matter the day the addon reports one.
-        ...(options.serverGenesis === undefined ? {} : { genesis_hash: options.serverGenesis }),
+        genesis_hash: options.serverGenesis ?? SWARM_MAINNET_GENESIS,
       });
     },
 

@@ -1,6 +1,6 @@
 {
   "name": "swarm-wallet-core",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "The SWARM wallet as one package: the Rust/neon addon plus a typed, promise-based TypeScript API, for embedding in the SWARM Messenger apps. Keys never leave the device.",
   "license": "MIT",

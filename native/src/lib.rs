@@ -1498,6 +1498,13 @@ fn info_server(mut cx: FunctionContext) -> JsResult<JsPromise> {
                         "sapling_activation_height": info.sapling_activation_height,
                         "consensus_branch_id": info.consensus_branch_id,
                         "latest_block_height": info.latest_block_height,
+                        // The chain's identity, not only its label: the
+                        // height-zero block hash the server indexes, from
+                        // `LightdInfo.genesisHash` (field 19, SDK
+                        // swarm-sdk-mainnet-1). Empty when the server did not
+                        // say — never "no genesis" — so a reader must treat
+                        // "" as unknown, not as a mismatch.
+                        "genesis_hash": info.genesis_hash,
                     })
                     .to_string()),
                     Err(e) => Err(ZingolibError::Read(cause_chain(&e))),
