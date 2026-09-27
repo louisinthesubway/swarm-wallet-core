@@ -29,6 +29,7 @@ import type {
   ParsedAddress,
   PerformanceLevel,
   ReceiverSelection,
+  ScanRange,
   SendQuote,
   SendRequest,
   SendResult,
@@ -86,6 +87,12 @@ export type SwarmWalletEvents = {
   synced: [SyncStatus];
   /** Emitted when a sync run fails. The wallet stays open. */
   "sync-error": [SwarmWalletError];
+  /**
+   * Emitted when the wallet file could not be saved after a payment was
+   * transmitted. The payment happened; `SendResult.saveError` carries the same
+   * error. Listen here to warn the user that the file on disk is behind.
+   */
+  "save-error": [SwarmWalletError];
 };
 
 /** How long between `status_sync` polls while a sync runs. */
@@ -261,11 +268,19 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
   /**
    * What the wallet holds, in zatoshi.
    *
-   * The pool field names have moved across SDK revisions, so several spellings
-   * are read. What this must never do is answer zero because it recognised
-   * nothing: a balance that reads 0 when the wallet is funded is the worst
-   * possible failure of a wallet screen. So a response carrying none of the known
-   * fields is a `malformed-response` throw that names what it did see.
+   * The addon's `get_balance` is zingolib's `AccountBalance` as JSON, and at
+   * wallet `745c2092` its keys are `confirmed_<pool>_balance`,
+   * `unconfirmed_<pool>_balance` and `total_<pool>_balance` for the pools
+   * `orchard`, `sapling`, `transparent` and `ironwood` — twelve keys, read off
+   * the mainnet.2 binary on 2026-09-27. 0.1.0 read `orchard_balance` and
+   * friends, which that addon never answers, and so refused every balance.
+   * The older spellings are still accepted after the real ones, for an SDK
+   * revision that goes back to them.
+   *
+   * What this must never do is answer zero because it recognised nothing: a
+   * balance that reads 0 when the wallet is funded is the worst possible failure
+   * of a wallet screen. So a response carrying none of the known fields is a
+   * `malformed-response` throw that names what it did see.
    */
   async balance(): Promise<Balance> {
     this.#assertOpen();
@@ -298,10 +313,24 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
       );
     };
 
-    const orchard = find(raw, ["orchard_balance", "orchard", "orchard_value"]);
-    const sapling = find(raw, ["sapling_balance", "sapling", "sapling_value"]);
-    const transparent = find(raw, ["transparent_balance", "transparent", "transparent_value"]);
+    // `total_<pool>_balance` first: that is the key the addon answers. The rest
+    // are older spellings, kept so a future SDK revision that reverts to one of
+    // them is read rather than refused.
+    const pool = (name: string): bigint | undefined =>
+      find(raw, [`total_${name}_balance`, `${name}_balance`, name, `${name}_value`]);
+    const orchard = pool("orchard");
+    const sapling = pool("sapling");
+    const transparent = pool("transparent");
+    // Ironwood is the fourth pool this SDK reports. Optional: an SDK without
+    // NU6.3 has no such pool, and its absence is not a malformed answer.
+    const ironwood = find(raw, ["total_ironwood_balance", "ironwood_balance"]);
     const statedTotal = find(raw, ["total", "total_balance"]);
+    // The confirmed thirds, summed over whichever pools report one.
+    let confirmed: bigint | null = null;
+    for (const name of ["orchard", "sapling", "transparent", "ironwood"]) {
+      const value = find(raw, [`confirmed_${name}_balance`]);
+      if (value !== undefined) confirmed = (confirmed ?? 0n) + value;
+    }
 
     // Either the addon states a total, or all three pools are readable so one can
     // be computed. Two of three is not enough for either.
@@ -325,15 +354,18 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     const spendableZat = spendable_ as bigint;
 
     const totalZat =
-      statedTotal ?? (orchard as bigint) + (sapling as bigint) + (transparent as bigint);
+      statedTotal ??
+      (orchard as bigint) + (sapling as bigint) + (transparent as bigint) + (ironwood ?? 0n);
     return {
       totalZat,
       spendableZat,
+      confirmedZat: confirmed,
       // `null` where the addon did not say, rather than a zero that reads as a
       // fact. A pane that shows a pool split has to handle null.
       orchardZat: orchard ?? null,
       saplingZat: sapling ?? null,
       transparentZat: transparent ?? null,
+      ironwoodZat: ironwood ?? null,
       pendingZat: totalZat > spendableZat ? totalZat - spendableZat : 0n,
       raw,
     };
@@ -485,11 +517,16 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
   async seedPhrase(): Promise<{ phrase: string; birthdayHeight: number }> {
     this.#assertOpen();
     const raw = await callAddon<Record<string, unknown>>("get_seed", () => this.#addon.get_seed());
-    const phrase = stringOr(raw["seed"], "");
+    // `get_seed` serialises zingolib's recovery info, whose keys are
+    // `seed_phrase`, `birthday` and `no_of_accounts` — the same object every
+    // `init_*` returns. 0.1.0 read `seed`, which is not there, and threw.
+    const phrase = stringOr(raw["seed_phrase"] ?? raw["seed"], "");
     if (!phrase) {
-      throw new SwarmWalletError("malformed-response", "get_seed answered no seed.", {
-        call: "get_seed",
-      });
+      throw new SwarmWalletError(
+        "malformed-response",
+        `get_seed answered an object with keys [${Object.keys(raw).join(", ")}] and no seed_phrase.`,
+        { call: "get_seed" },
+      );
     }
     return { phrase, birthdayHeight: numberOrNull(raw["birthday"]) ?? 0 };
   }
@@ -641,8 +678,15 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
             { call: "confirm" },
           );
         }
-        await this.#persist();
-        return { txids, feeZat };
+        // From here the money has moved and the txids are the one fact that must
+        // reach the caller. The save is wanted — it writes the spend to disk —
+        // but a save that fails is a file problem, not a payment problem, and
+        // throwing it with the txids inside is how 0.1.0 lost the ids of a
+        // payment already on the network. So the save is attempted, its failure
+        // is reported beside the txids and as a `save-error` event, and the next
+        // save (a sync, `close()`) writes the same state.
+        const saveError = await this.#persistReporting();
+        return { txids, feeZat, saved: saveError === null, saveError };
       },
     };
   }
@@ -716,23 +760,60 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     }
   }
 
-  /** Where the sync has got to, without starting one. */
+  /**
+   * Where the sync has got to, without starting one.
+   *
+   * `status_sync` is `pepper_sync::sync_status` as JSON. It carries no height
+   * field: what it carries is the plan, `scan_ranges: [{priority, start_block,
+   * end_block}]` with the block numbers as strings, and counters —
+   * `total_blocks_scanned`, `percentage_total_blocks_scanned` and so on. The
+   * heights here are derived from the plan: the synced height is the top of the
+   * run of `Scanned` ranges from the bottom, the chain height is the top of the
+   * highest range. 0.1.0 read `scan_height` and `chain_height`, which are not
+   * there, and answered null for both.
+   */
   async syncStatus(): Promise<SyncStatus> {
     this.#assertOpen();
     const raw = await callAddon<Record<string, unknown>>("status_sync", () =>
       this.#addon.status_sync(),
     );
-    const syncedHeight = numberOrNull(
-      raw["scan_height"] ?? raw["synced_height"] ?? raw["last_scanned_height"],
-    );
-    const chainHeight = numberOrNull(
-      raw["chain_height"] ?? raw["target_height"] ?? raw["last_known_chain_height"],
-    );
+    const ranges = scanRanges(raw["scan_ranges"]);
+    let syncedHeight: number | null = null;
+    let chainHeight: number | null = null;
+    if (ranges.length > 0) {
+      for (const range of ranges) {
+        if (range.priority !== "Scanned") break;
+        syncedHeight = range.end;
+      }
+      chainHeight = ranges[ranges.length - 1]!.end;
+    } else {
+      // No plan yet — or an SDK that reports heights directly. Read those, so a
+      // revision that goes back to them is read rather than answered null.
+      syncedHeight = numberOrNull(
+        raw["scan_height"] ?? raw["synced_height"] ?? raw["last_scanned_height"],
+      );
+      chainHeight = numberOrNull(
+        raw["chain_height"] ?? raw["target_height"] ?? raw["last_known_chain_height"],
+      );
+    }
+    // The addon's own percentage when it states one over a plan; the height
+    // ratio otherwise.
+    const percentage = numberOrNull(raw["percentage_total_blocks_scanned"]);
     const progress =
-      syncedHeight !== null && chainHeight !== null && chainHeight > 0
-        ? Math.min(1, Math.max(0, syncedHeight / chainHeight))
-        : null;
-    return { syncing: this.#syncing, syncedHeight, chainHeight, progress, raw };
+      percentage !== null && ranges.length > 0
+        ? Math.min(1, Math.max(0, percentage / 100))
+        : syncedHeight !== null && chainHeight !== null && chainHeight > 0
+          ? Math.min(1, Math.max(0, syncedHeight / chainHeight))
+          : null;
+    return {
+      syncing: this.#syncing,
+      syncedHeight,
+      chainHeight,
+      progress,
+      blocksScanned: numberOrNull(raw["total_blocks_scanned"]),
+      ranges,
+      raw,
+    };
   }
 
   /** Stops a running sync. Does not close the wallet. Answers the addon's prose. */
@@ -937,6 +1018,29 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     await this.store.save();
   }
 
+  /**
+   * `#persist`, for the one place a failure must not propagate: after a
+   * transmit. Answers the error instead of throwing it, and emits it as
+   * `save-error` so a UI with no hand on the `SendResult` still hears.
+   */
+  async #persistReporting(): Promise<SwarmWalletError | null> {
+    try {
+      await this.#persist();
+      return null;
+    } catch (cause) {
+      const error =
+        cause instanceof SwarmWalletError
+          ? cause
+          : new SwarmWalletError(
+              "wallet-file",
+              `saving the wallet after the transmit failed: ${(cause as Error).message}`,
+              { cause },
+            );
+      this.emit("save-error", error);
+      return error;
+    }
+  }
+
   async #abandon(): Promise<void> {
     try {
       this.#addon.deinitialize();
@@ -1014,14 +1118,16 @@ const numberOrNull = (value: unknown): number | null => {
  *   transparent:  {account, address_index, scope, encoded_address}
  *
  * Confirmed against the desktop wallet's own readers
- * (`UnifiedAddressClass` / `TransparentAddressClass` in `src/components/appstate/classes/`).
- * This looked for `address`, found nothing, and returned an empty list — so the
- * live mainnet run opened a wallet and then reported it had no receive address.
+ * (`UnifiedAddressClass` / `TransparentAddressClass` in `src/components/appstate/classes/`)
+ * and read off the mainnet.2 binary itself on 2026-09-27. This looked for
+ * `address`, found nothing, and returned an empty list — so the live mainnet run
+ * opened a wallet and then reported it had no receive address.
  *
  * Transparent addresses carry a `scope`, and only `external` ones are addresses to
  * be paid at: `internal` is change and `refund` is reserved for a swap refund.
  * Handing either to a user as "your address" would publish a change address.
- * Plain strings are still accepted, in case a future SDK simplifies the shape.
+ * Plain strings and `address` are still accepted, in case a future SDK
+ * simplifies the shape.
  */
 const addressStrings = (value: unknown, externalOnly = false): readonly string[] => {
   const list = Array.isArray(value)
@@ -1038,9 +1144,29 @@ const addressStrings = (value: unknown, externalOnly = false): readonly string[]
     if (!isRecord(entry)) continue;
     if (externalOnly && entry["scope"] !== undefined && entry["scope"] !== "external") continue;
     const encoded = entry["encoded_address"] ?? entry["address"];
-    if (typeof encoded === "string") out.push(encoded);
+    if (typeof encoded === "string" && encoded.length > 0) out.push(encoded);
   }
   return out;
+};
+
+/**
+ * The sync plan out of `status_sync`, lowest range first.
+ *
+ * `start_block` and `end_block` are strings in the addon's JSON (`"1"`,
+ * `"614"`), which `numberOrNull` reads. A range missing either bound is
+ * dropped rather than guessed at.
+ */
+const scanRanges = (value: unknown): readonly ScanRange[] => {
+  if (!Array.isArray(value)) return [];
+  const out: ScanRange[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const start = numberOrNull(entry["start_block"] ?? entry["start"]);
+    const end = numberOrNull(entry["end_block"] ?? entry["end"]);
+    if (start === null || end === null) continue;
+    out.push({ start, end, priority: stringOr(entry["priority"], "unknown") });
+  }
+  return out.sort((a, b) => a.start - b.start);
 };
 
 /**

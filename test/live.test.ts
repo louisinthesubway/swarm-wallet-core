@@ -111,6 +111,15 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
     expect(info.genesisHash).toBeNull();
     expect(info.genesisVerified).toBe(false);
 
+    // Before the first sync the plan is empty and nothing has been scanned. Both
+    // heights are null — not zero, not a guess.
+    const before = await wallet.syncStatus();
+    expect(before.ranges).toEqual([]);
+    expect(before.syncedHeight).toBeNull();
+    expect(before.syncing).toBe(false);
+
+    // The addon answers objects with `encoded_address`; 0.1.0 read strings and
+    // `address` and answered two empty lists here. This is the line that failed.
     const addresses = await wallet.addresses();
     const [receive] = addresses.unified;
     say(`receive address: ${receive}`);
@@ -119,9 +128,19 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
     // Not a Zcash address, not a SwarmTestnet address, by construction.
     expect(receive!.startsWith("u1")).toBe(false);
     expect(receive!.startsWith("swarm1")).toBe(false);
+    // And the transparent list, which has the same shape with a `scope`.
+    expect(addresses.transparent).toHaveLength(1);
+    expect(addresses.transparent[0]).toMatch(/^s[13]/);
 
     const verdict = await wallet.parseAddress(receive!);
     expect(verdict.valid).toBe(true);
+
+    // The recovery phrase is readable through the package — 0.1.0 threw here,
+    // reading `seed` where the addon writes `seed_phrase`. Only its word count
+    // is looked at, and nothing about it goes into `output`.
+    const recovery = await wallet.seedPhrase();
+    expect(recovery.phrase.trim().split(/\s+/)).toHaveLength(24);
+    expect(recovery.birthdayHeight).toBeGreaterThan(0);
 
     let lastProgress = -1;
     wallet.on("status", (status) => {
@@ -131,14 +150,30 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
       }
     });
     const synced = await wallet.sync();
-    say(`synced to ${synced.syncedHeight} of ${synced.chainHeight}`);
+    say(`synced to ${synced.syncedHeight} of ${synced.chainHeight} (${synced.ranges.length} ranges)`);
+    // Heights come out of `scan_ranges`; 0.1.0 answered null for both. A finished
+    // run has every range Scanned, so the synced height IS the chain height, and
+    // the chain the sync saw is at least as high as the server said before it.
     expect(synced.chainHeight).toBeGreaterThan(0);
+    expect(synced.syncedHeight).toBe(synced.chainHeight);
+    expect(synced.chainHeight!).toBeGreaterThanOrEqual(info.blockHeight!);
+    expect(synced.progress).toBe(1);
+    expect(synced.ranges.length).toBeGreaterThan(0);
+    expect(synced.ranges.every((range) => range.priority === "Scanned")).toBe(true);
+    expect(synced.blocksScanned).toBeGreaterThan(0);
 
+    // The balance reads through the addon's twelve confirmed_/unconfirmed_/total_
+    // pool keys; 0.1.0 refused this object as unreadable.
     const balance = await wallet.balance();
     say(`balance: ${balance.totalZat} zatoshi total, ${balance.spendableZat} spendable`);
     // A wallet created seconds ago on a chain nobody has paid it on.
     expect(balance.totalZat).toBe(0n);
     expect(balance.spendableZat).toBe(0n);
+    expect(balance.confirmedZat).toBe(0n);
+    expect(balance.orchardZat).toBe(0n);
+    expect(balance.saplingZat).toBe(0n);
+    expect(balance.transparentZat).toBe(0n);
+    expect(balance.ironwoodZat).toBe(0n);
 
     expect(await wallet.transactions()).toEqual([]);
 
@@ -155,7 +190,7 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
     expect(LOOKS_LIKE_A_SEED.test(everything), `output looked like a seed: ${everything}`).toBe(
       false,
     );
-    for (const word of ["abandon", "seed", "mnemonic", "recovery"]) {
+    for (const word of ["abandon", "seed", "mnemonic", "recovery", "phrase"]) {
       expect(everything.toLowerCase()).not.toContain(word);
     }
   });

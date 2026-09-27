@@ -281,6 +281,23 @@ describe("reading", () => {
     expect(balance.pendingZat).toBe(50_000_000n);
   });
 
+  it("reads the twelve keys the addon really answers, per pool and per state", async () => {
+    // confirmed_/unconfirmed_/total_ × ironwood/orchard/sapling/transparent. 0.1.0
+    // read `orchard_balance`, which is not among them, and refused every balance
+    // this addon produced — correctly, rather than reporting zero, but a wallet
+    // that refuses to state its balance is not a wallet.
+    const { wallet, addon } = await open();
+    const raw = JSON.parse(await addon.get_balance()) as Record<string, unknown>;
+    expect(Object.keys(raw)).toHaveLength(12);
+    expect(raw).toHaveProperty("total_orchard_balance");
+    expect(raw).not.toHaveProperty("orchard_balance");
+    const balance = await wallet.balance();
+    expect(balance.orchardZat).toBe(150_000_000n);
+    expect(balance.saplingZat).toBe(0n);
+    expect(balance.ironwoodZat).toBe(0n);
+    expect(balance.confirmedZat).toBe(200_000_000n);
+  });
+
   it("refuses a balance shape it cannot read, rather than reporting a wrong number", async () => {
     // A wallet screen showing 0 SWM for a funded wallet is the worst failure this
     // package can have, and a renamed SDK field is how it would happen.
@@ -328,6 +345,20 @@ describe("reading", () => {
       JSON.stringify([{ account: 0, ua: "swm1somethingElseEntirely" }]);
     await expect(wallet.addresses()).rejects.toThrow(/no address could be read/);
     addon.get_unified_addresses = original;
+  });
+
+  it("reads the address out of `encoded_address`, where the addon puts it", async () => {
+    // The addon answers objects — {account, address_index, has_orchard, …,
+    // encoded_address} — not strings and not {address}. 0.1.0 read the latter two
+    // and answered two empty lists for a wallet that had addresses, which a
+    // caller cannot tell from "no addresses yet".
+    const { wallet, addon } = await open();
+    const raw = JSON.parse(await addon.get_unified_addresses()) as Array<Record<string, unknown>>;
+    expect(raw[0]).toHaveProperty("encoded_address");
+    expect(raw[0]).not.toHaveProperty("address");
+    const { unified, transparent } = await wallet.addresses();
+    expect(unified).toEqual([raw[0]!["encoded_address"]]);
+    expect(transparent).toHaveLength(1);
   });
 
   it("asks for both shielded receivers with the FLAG STRING the addon reads", async () => {
@@ -380,7 +411,14 @@ describe("reading", () => {
   });
 
   it("hands over the seed only when asked for it by name", async () => {
-    const { wallet, log } = await open();
+    const { wallet, log, addon } = await open();
+    // The addon's key is `seed_phrase` (zingolib's recovery info), not `seed`;
+    // reading `seed` is why 0.1.0 threw "get_seed answered no seed".
+    expect(Object.keys(JSON.parse(await addon.get_seed()) as object)).toEqual([
+      "seed_phrase",
+      "birthday",
+      "no_of_accounts",
+    ]);
     const { phrase, birthdayHeight } = await wallet.seedPhrase();
     expect(phrase.split(" ")).toHaveLength(24);
     expect(birthdayHeight).toBe(1);
@@ -388,7 +426,8 @@ describe("reading", () => {
     // balance object for a seed word, which three fixed integers could never
     // contain — an assertion that cannot fail. What is worth checking is that
     // get_seed is called once, and only from here.)
-    expect(log.calls.filter((call) => call.name === "get_seed")).toHaveLength(1);
+    // Two: the check above, and seedPhrase(). Nothing else.
+    expect(log.calls.filter((call) => call.name === "get_seed")).toHaveLength(2);
   });
 });
 
@@ -520,6 +559,41 @@ describe("sending", () => {
     ).rejects.toThrow(/Zcash mainnet/);
   });
 
+  it("keeps the txids when the save after the transmit fails", async () => {
+    // 0.1.0 persisted AFTER transmitting and let the persist throw — so a full
+    // disk, or a save answer it could not read, turned a payment already on the
+    // network into an exception with the txids inside it. Here the money has
+    // moved: the txids come back, the save failure comes back beside them, and
+    // the same error is emitted for a UI that only listens.
+    const { wallet } = await open({ saveErrorAfterConfirm: "No space left on device" });
+    const heard: SwarmWalletError[] = [];
+    wallet.on("save-error", (error) => heard.push(error));
+    const [address] = (await wallet.addresses()).unified;
+    const quote = await wallet.proposeSend({ to: address!, amountZat: 100_000n });
+
+    const result = await quote.confirm();
+    expect(result.txids).toEqual(["cc".repeat(32)]);
+    expect(result.feeZat).toBe(15_000n);
+    expect(result.saved).toBe(false);
+    expect(result.saveError).toBeInstanceOf(SwarmWalletError);
+    expect(result.saveError?.message).toMatch(/No space left on device/);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toBe(result.saveError);
+    // The wallet is still open and usable; the disk is the problem, not the wallet.
+    expect((await wallet.balance()).spendableZat).toBe(150_000_000n);
+    // And close() still reports the save failure, as it always did.
+    await expect(wallet.close()).rejects.toThrow(/No space left on device/);
+    openWallets.length = 0;
+  });
+
+  it("reports a successful save as such", async () => {
+    const { wallet } = await open();
+    const [address] = (await wallet.addresses()).unified;
+    const result = await (await wallet.proposeSend({ to: address!, amountZat: 100_000n })).confirm();
+    expect(result.saved).toBe(true);
+    expect(result.saveError).toBeNull();
+  });
+
   it("honours a fee ceiling rather than paying more than the caller agreed", async () => {
     const { wallet, log } = await open();
     const [address] = (await wallet.addresses()).unified;
@@ -549,11 +623,48 @@ describe("syncing", () => {
       if (status.progress !== null) seen.push(status.progress);
     });
     const final = await wallet.sync();
-    expect(final.syncedHeight).toBe(900);
+    expect(final.syncedHeight).toBe(1000);
     expect(final.chainHeight).toBe(1000);
-    expect(seen.length).toBeGreaterThanOrEqual(2);
-    expect(seen.every((value) => value === 0.9)).toBe(true);
+    expect(final.progress).toBe(1);
+    // Two polls in flight at 90%, then the plan is all Scanned.
+    expect(seen.slice(0, 2)).toEqual([0.9, 0.9]);
+    expect(seen.at(-1)).toBe(1);
   }, 30_000);
+
+  it("derives the heights from scan_ranges, which is all status_sync carries", async () => {
+    // pepper_sync's status has no height field. It has a plan — ranges with
+    // STRING block numbers and a priority — and counters. 0.1.0 read
+    // `scan_height` / `chain_height`, which do not exist, and answered null for
+    // both, so a caller could never tell a synced wallet from an unsynced one.
+    const { wallet, addon } = await open({ syncPolls: 1 });
+    const raw = JSON.parse(await addon.status_sync()) as Record<string, unknown>;
+    expect(raw).not.toHaveProperty("scan_height");
+    expect(raw).not.toHaveProperty("chain_height");
+    expect((raw["scan_ranges"] as Array<Record<string, unknown>>)[0]!["start_block"]).toBe("1");
+
+    const status = await wallet.syncStatus();
+    // The synced height stops at the top of the Scanned run from the bottom; the
+    // chain height is the top of the highest range, whatever its state.
+    expect(status.syncedHeight).toBe(900);
+    expect(status.chainHeight).toBe(1000);
+    expect(status.progress).toBe(0.9);
+    expect(status.blocksScanned).toBe(900);
+    expect(status.ranges).toEqual([
+      { start: 1, end: 900, priority: "Scanned" },
+      { start: 901, end: 1000, priority: "ChainTip" },
+    ]);
+    expect(status.syncing).toBe(false);
+  });
+
+  it("still reads an SDK revision that states the heights directly", async () => {
+    const { wallet } = await open({ legacySyncStatus: true });
+    const status = await wallet.syncStatus();
+    expect(status.syncedHeight).toBe(900);
+    expect(status.chainHeight).toBe(1000);
+    expect(status.progress).toBe(0.9);
+    expect(status.ranges).toEqual([]);
+    expect(status.blocksScanned).toBeNull();
+  });
 
   it("emits `synced` once the run finishes", async () => {
     const { wallet } = await open({ syncPolls: 0 });

@@ -100,6 +100,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Which release the binaries go to. A dispatch names it; a `build-<version>`
+      # tag push means the release `swarm-wallet-core-<version>`; anything else
+      # falls back to the first release, as it always did. Resolved once, here,
+      # so the upload and the sums job cannot disagree.
+      - name: Resolve the release tag
+        shell: bash
+        run: |
+          tag="${{ inputs.release_tag }}"
+          if [ -z "$tag" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="swarm-wallet-core-${GITHUB_REF_NAME#build-}"
+          fi
+          : "${tag:=swarm-wallet-core-0.1.0-m1}"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "release: $tag"
+
       - name: Check out the pinned SDK revision
         uses: actions/checkout@v4
         with:
@@ -278,7 +293,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.release_tag || 'swarm-wallet-core-0.1.0-m1' }}
+          TAG: ${{ env.RELEASE_TAG }}
         run: |
           set -euo pipefail
           if ! gh release view "$TAG" >/dev/null 2>&1; then
@@ -343,11 +358,21 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      - name: Resolve the release tag
+        shell: bash
+        run: |
+          tag="${{ inputs.release_tag }}"
+          if [ -z "$tag" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="swarm-wallet-core-${GITHUB_REF_NAME#build-}"
+          fi
+          : "${tag:=swarm-wallet-core-0.1.0-m1}"
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+
       - name: Hash what the release actually holds
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.release_tag || 'swarm-wallet-core-0.1.0-m1' }}
+          TAG: ${{ env.RELEASE_TAG }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail

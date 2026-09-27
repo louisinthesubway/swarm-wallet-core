@@ -141,7 +141,7 @@ existing `crash-reports:get-count`, `windows-notifications:clear-all`,
 | `swarm-wallet:transactions` | invoke | `{ limit?, before? }` | `WalletTransactionDTO[]` |
 | `swarm-wallet:parse-address` | invoke | `{ address }` | `ParsedAddress` |
 | `swarm-wallet:quote-send` | invoke | `{ to, amount, memo? }` | `{ quoteId, feeZat }` — **transmits nothing** |
-| `swarm-wallet:confirm-send` | invoke | `{ quoteId }` | `{ txids }` |
+| `swarm-wallet:confirm-send` | invoke | `{ quoteId }` | `{ txids, saved }` — the txids are the fact; `saved: false` means the wallet file did not follow and the pane should say the file is behind, not that the payment failed |
 | `swarm-wallet:sync` | invoke | — | `{ started: true }` |
 | `swarm-wallet:sync-status` | invoke | — | `SyncStatus` |
 | `swarm-wallet:close` | invoke | — | `{ closed: true }` |

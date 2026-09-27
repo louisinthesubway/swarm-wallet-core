@@ -15,6 +15,14 @@
  * successfully. Size: 420 bytes.` A mock that is tidier than the addon is a mock
  * that certifies the bug.
  *
+ * The same happened once more, with key names. The mock answered
+ * `orchard_balance`, address strings, `scan_height` and `seed`; the addon
+ * answers `total_orchard_balance` (and eleven more), objects with
+ * `encoded_address`, `scan_ranges` with string block numbers, and
+ * `seed_phrase`. Every shape below was read off the mainnet.2 binary
+ * (`native.node` sha256 2dcd84bb…, wallet `745c2092`) on 2026-09-27 with a
+ * throwaway wallet; `test/live.test.ts` checks the real thing.
+ *
  * It also writes a wallet file, because `WalletStore` has one to encrypt and a
  * test that skips that step proves nothing about the sealing.
  */
@@ -49,6 +57,16 @@ export type FakeAddonOptions = {
   readonly unknownBalanceShape?: boolean;
   /** Rename ONLY the orchard field, the dangerous half-recognised case. */
   readonly renameOrchardBalance?: boolean;
+  /**
+   * Make `save_wallet_file` reject with this message once `confirm` has
+   * transmitted — a full disk right after a payment.
+   */
+  readonly saveErrorAfterConfirm?: string;
+  /**
+   * Answer `status_sync` with an SDK revision's direct heights instead of a
+   * plan, to keep the older shape readable.
+   */
+  readonly legacySyncStatus?: boolean;
 };
 
 /** What the fake recorded, so a test can assert on the arguments it was given. */
@@ -66,6 +84,7 @@ export const createFakeAddon = (
   let addressCounter = 0;
   let pollsLeft = options.syncPolls ?? 1;
   let proposalStored = false;
+  let transmitted = false;
   // A real bech32m string with a valid checksum, so the wrapper's own
   // pre-check accepts it exactly as it would accept a real address. A
   // checksum-invalid placeholder here would make every send test fail for the
@@ -76,6 +95,40 @@ export const createFakeAddon = (
   const transparent = ["s1FakeTransparentAddressAaaaaaaaaaa"];
   /** A change address. It must never be offered as somewhere to be paid. */
   const transparentInternal = "s1FakeInternalChangeAddressBbbbbbb";
+  // The recovery info every init_* returns and get_seed repeats. Not a real
+  // seed: twenty-four repetitions of one word, which no BIP-39 checksum accepts.
+  const recoveryInfo = (): string =>
+    JSON.stringify({
+      seed_phrase: Array.from({ length: 24 }, () => "abandon").join(" "),
+      birthday: 1,
+      no_of_accounts: 1,
+    });
+  /** `unified_addresses_json`: objects, the string under `encoded_address`. */
+  const unifiedJson = (): string =>
+    JSON.stringify(
+      unified.map((encoded_address, address_index) => ({
+        account: 0,
+        address_index,
+        has_orchard: true,
+        has_sapling: address_index > 0,
+        has_transparent: false,
+        encoded_address,
+      })),
+    );
+  /**
+   * `transparent_addresses_json`: objects again, with a `scope` — and an
+   * `internal` change address among them, which the wrapper must leave out.
+   */
+  const transparentJson = (): string =>
+    JSON.stringify([
+      ...transparent.map((encoded_address, address_index) => ({
+        account: 0,
+        address_index,
+        scope: "external",
+        encoded_address,
+      })),
+      { account: 0, address_index: 0, scope: "internal", encoded_address: transparentInternal },
+    ]);
 
   const record = (name: string, ...args: unknown[]): void => {
     log.calls.push({ name, args });
@@ -101,9 +154,7 @@ export const createFakeAddon = (
       ? join(log.baseDir, subdirectory, walletName)
       : join(log.baseDir, walletName);
     initialized = true;
-    // A seed phrase shaped like the real one. Not a real seed: twenty-four
-    // repetitions of one word, which no BIP-39 checksum accepts.
-    return JSON.stringify({ seed: Array.from({ length: 24 }, () => "abandon").join(" "), birthday: 1 });
+    return recoveryInfo();
   };
 
   const addon: NativeAddon = {
@@ -194,6 +245,9 @@ export const createFakeAddon = (
       requireOpen("save_wallet_file");
       if (walletFile === null) throw new Error("no wallet path");
       if (options.saveError) throw new Error(`Save error. ${options.saveError}`);
+      if (options.saveErrorAfterConfirm && transmitted) {
+        throw new Error(`Save error. ${options.saveErrorAfterConfirm}`);
+      }
       mkdirSync(dirname(walletFile), { recursive: true });
       const bytes = `fake zingolib wallet bytes ${log.calls.length}`;
       writeFileSync(walletFile, bytes);
@@ -214,10 +268,8 @@ export const createFakeAddon = (
 
     async get_seed(): Promise<string> {
       requireOpen("get_seed");
-      return JSON.stringify({
-        seed: Array.from({ length: 24 }, () => "abandon").join(" "),
-        birthday: 1,
-      });
+      // `seed_phrase`, not `seed`: zingolib's recovery info as serde writes it.
+      return recoveryInfo();
     },
 
     async get_ufvk(): Promise<string> {
@@ -231,20 +283,29 @@ export const createFakeAddon = (
         // What a renamed SDK field set would look like from here.
         return JSON.stringify({ pools: { orchard: 150_000_000 }, unit: "zatoshi" });
       }
+      // zingolib's AccountBalance: three figures per pool, four pools, twelve
+      // keys. Verbatim key names from the mainnet.2 binary.
+      const balance: Record<string, number> = {
+        confirmed_ironwood_balance: 0,
+        unconfirmed_ironwood_balance: 0,
+        total_ironwood_balance: 0,
+        confirmed_orchard_balance: 150_000_000,
+        unconfirmed_orchard_balance: 0,
+        total_orchard_balance: 150_000_000,
+        confirmed_sapling_balance: 0,
+        unconfirmed_sapling_balance: 0,
+        total_sapling_balance: 0,
+        confirmed_transparent_balance: 50_000_000,
+        unconfirmed_transparent_balance: 0,
+        total_transparent_balance: 50_000_000,
+      };
       if (options.renameOrchardBalance) {
         // One field renamed and the rest intact: the case a per-pool fallback to
         // zero would report as a funded wallet missing its whole shielded balance.
-        return JSON.stringify({
-          orchard_note_value: 150_000_000,
-          sapling_balance: 0,
-          transparent_balance: 50_000_000,
-        });
+        const { total_orchard_balance, ...rest } = balance;
+        return JSON.stringify({ ...rest, orchard_note_value: total_orchard_balance });
       }
-      return JSON.stringify({
-        orchard_balance: 150_000_000,
-        sapling_balance: 0,
-        transparent_balance: 50_000_000,
-      });
+      return JSON.stringify(balance);
     },
 
     async get_spendable_balance_total(): Promise<string> {
@@ -257,29 +318,12 @@ export const createFakeAddon = (
       // Objects with `encoded_address`, which is what the addon really answers.
       // A fake that answered bare strings is why the live run opened a wallet and
       // then reported it had no receive address.
-      return JSON.stringify(
-        unified.map((encoded_address, index) => ({
-          account: 0,
-          address_index: index,
-          encoded_address,
-          has_orchard: true,
-          has_sapling: true,
-          has_transparent: true,
-        })),
-      );
+      return unifiedJson();
     },
 
     async get_transparent_addresses(): Promise<string> {
       requireOpen("get_transparent_addresses");
-      return JSON.stringify([
-        ...transparent.map((encoded_address, index) => ({
-          account: 0,
-          address_index: index,
-          scope: "external",
-          encoded_address,
-        })),
-        { account: 0, address_index: 0, scope: "internal", encoded_address: transparentInternal },
-      ]);
+      return transparentJson();
     },
 
     async create_new_unified_address(receivers: string): Promise<string> {
@@ -306,12 +350,13 @@ export const createFakeAddon = (
     async create_new_transparent_address(): Promise<string> {
       requireOpen("create_new_transparent_address");
       transparent.push(`s1NewTransparent${transparent.length}`);
-      return JSON.stringify(transparent);
+      return transparentJson();
     },
 
     async get_value_transfers(): Promise<string> {
       requireOpen("get_value_transfers");
-      return JSON.stringify([
+      // The addon wraps the list: `{"value_transfers": [...]}`.
+      return JSON.stringify({ value_transfers: [
         {
           txid: "aa".repeat(32),
           kind: "received",
@@ -335,7 +380,7 @@ export const createFakeAddon = (
         // shapes the SDK could produce, and neither may be read as income.
         { txid: "cc".repeat(32), kind: { Sent: { pool: "orchard" } }, value: 1_000 },
         { txid: "dd".repeat(32), kind: "Rearrangement", value: 2_000 },
-      ]);
+      ] });
     },
 
     async get_messages(): Promise<string> {
@@ -372,7 +417,34 @@ export const createFakeAddon = (
 
     async status_sync(): Promise<string> {
       requireOpen("status_sync");
-      return JSON.stringify({ scan_height: 900, chain_height: 1000 });
+      if (options.legacySyncStatus) {
+        return JSON.stringify({ scan_height: 900, chain_height: 1000 });
+      }
+      // pepper_sync::sync_status: a plan of ranges with STRING block numbers,
+      // and counters. No height field anywhere. While polls are left the top
+      // range is still pending; when none are, everything is Scanned.
+      const done = pollsLeft <= 0;
+      return JSON.stringify({
+        scan_ranges: [
+          { priority: "Scanned", start_block: "1", end_block: "900" },
+          { priority: done ? "Scanned" : "ChainTip", start_block: "901", end_block: "1000" },
+        ],
+        sync_start_height: 1,
+        session_blocks_scanned: done ? 1000 : 900,
+        total_blocks_scanned: done ? 1000 : 900,
+        percentage_session_blocks_scanned: done ? 100 : 90,
+        percentage_total_blocks_scanned: done ? 100 : 90,
+        session_sapling_outputs_scanned: 0,
+        total_sapling_outputs_scanned: 0,
+        session_orchard_outputs_scanned: 0,
+        total_orchard_outputs_scanned: 0,
+        session_ironwood_outputs_scanned: 0,
+        total_ironwood_outputs_scanned: 0,
+        percentage_session_outputs_scanned: 0,
+        percentage_total_outputs_scanned: 0,
+        total_outputs_scanned: 0,
+        total_outputs: 0,
+      });
     },
 
     async run_rescan(): Promise<string> {
@@ -477,6 +549,7 @@ export const createFakeAddon = (
       requireOpen("confirm");
       if (!proposalStored) return JSON.stringify({ error: "no proposal stored" });
       proposalStored = false;
+      transmitted = true;
       return JSON.stringify({ txids: ["cc".repeat(32)] });
     },
 

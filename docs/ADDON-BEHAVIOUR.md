@@ -79,6 +79,29 @@ string cannot supply the genesis a `SwarmMainnet` chain type needs. A valid
 address from another of those three and report `chain_name` for it, so a wallet on
 `main` must compare that itself — `parseAddress` does.
 
+## The reading shapes, as observed on the mainnet.2 binary
+
+Read on 2026-09-27 from the `native.node` shipped in SWARM Wallet
+0.1.0-mainnet.2 (sha256 `2dcd84bb…`, source `745c2092`), with a throwaway wallet
+against `lwd-main.swarm.green:8443` at tip 614. These are the shapes the FUEL
+session found 0.1.0 reading wrongly, so they are spelled out.
+
+| Entry point | Answers |
+| --- | --- |
+| `init_new` / `init_from_seed` / `init_from_b64` / `get_seed` | `{"seed_phrase": "…", "birthday": N, "no_of_accounts": 1}` — **`seed_phrase`**, not `seed` |
+| `get_balance` | twelve keys: `confirmed_<pool>_balance`, `unconfirmed_<pool>_balance`, `total_<pool>_balance` for `ironwood`, `orchard`, `sapling`, `transparent` — no `orchard_balance`, no `total` |
+| `get_spendable_balance_total` | `{"spendable_balance": N}` |
+| `get_unified_addresses` | `[{"account": 0, "address_index": 0, "has_orchard": true, "has_sapling": false, "has_transparent": false, "encoded_address": "swm1…"}]` |
+| `get_transparent_addresses` | `[{"account": 0, "address_index": 0, "scope": "external", "encoded_address": "s1…"}]` |
+| `get_value_transfers` | `{"value_transfers": [...]}` — wrapped, not a bare list |
+| `get_latest_block_wallet` | `{"height": N}` |
+| `status_sync` | `{"scan_ranges": [{"priority": "Scanned", "start_block": "1", "end_block": "614"}], "sync_start_height": 1, "session_blocks_scanned": 614, "total_blocks_scanned": 614, "percentage_session_blocks_scanned": 100, "percentage_total_blocks_scanned": 100, …output counters…}` — the block numbers are **strings**, and there is no height field; before the first sync `scan_ranges` is `[]` |
+| `wallet_kind` | `{"kind": "…", "transparent": true, "sapling": true, "orchard": true}` |
+
+A fresh wallet's first `save_wallet_file` answers `"Wallet is empty. Nothing to
+save."`; the file appears after the first sync. `SwarmWallet.#persist` treats
+that answer as "nothing to seal yet".
+
 ## `set_wallet_base_dir` is a `OnceCell`
 
 `WALLET_BASE_DIR.set(..).is_ok()`. The first caller in the process wins, for the

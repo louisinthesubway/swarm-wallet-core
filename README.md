@@ -39,7 +39,7 @@ const [receive] = (await wallet.addresses()).unified; // swm1…
 
 const quote = await wallet.proposeSend({ to: recipient, amountZat: 100_000n, memo: "coffee" });
 showFee(quote.feeZat);          // nothing has been transmitted yet
-const { txids } = await quote.confirm();
+const { txids, saved } = await quote.confirm();   // txids first; `saved` says whether the file followed
 
 await wallet.close();           // saves, seals, wipes the plaintext
 ```
@@ -50,11 +50,11 @@ await wallet.close();           // saves, seals, wipes the plaintext
 | --- | --- |
 | `SwarmWallet.openOrCreate(options)` | Opens the wallet in `dataDir`, creating one if there is none. Creation needs the network: the addon derives the birthday from the chain tip. |
 | `SwarmWallet.restoreFromSeed(options)` | Restores a BIP-39 phrase. Refuses if a wallet already exists in `dataDir`. |
-| `wallet.balance()` / `balanceText()` | `bigint` zatoshi, total and spendable apart; or one formatted string. |
+| `wallet.balance()` / `balanceText()` | `bigint` zatoshi, total and spendable apart, plus the per-pool totals (orchard, sapling, transparent, ironwood) and the confirmed sum; or one formatted string. |
 | `wallet.addresses()` / `newAddress(receivers?)` | Unified and transparent lists; a new unified address (orchard **and** sapling by default — the addon's `generate_unified_address` takes no transparent flag). |
-| `wallet.proposeSend(request)` → `SendQuote` | Builds the proposal and returns its fee. **Transmits nothing.** `quote.confirm()` transmits, and refuses if a later proposal has replaced it. |
+| `wallet.proposeSend(request)` → `SendQuote` | Builds the proposal and returns its fee. **Transmits nothing.** `quote.confirm()` transmits, and refuses if a later proposal has replaced it. It resolves `{txids, feeZat, saved, saveError}`: once the addon has answered txids nothing thrown afterwards may lose them, so a wallet-file save that fails after the transmit is reported in the result and as a `save-error` event, never as an exception. |
 | `wallet.send({…, maxFeeZat})` | Propose and confirm in one call, refusing above a fee ceiling. |
-| `wallet.sync({signal?})` + `status` / `synced` / `sync-error` events | One run to the chain tip, polling the addon as it goes. |
+| `wallet.sync({signal?})` + `status` / `synced` / `sync-error` events | One run to the chain tip, polling the addon as it goes. `SyncStatus` heights are derived from the addon's `scan_ranges` plan. |
 | `wallet.transactions()` | Value transfers: a magnitude plus `direction: "in" \| "out" \| "unknown"`. Never a guessed sign. |
 | `wallet.parseAddress(address)` | Verdict plus `decodedBy: "addon" \| "prefix"` — read the note below. |
 | `wallet.seedPhrase()` | The seed, only when asked for by name. Nothing else in this package reads it. |
@@ -116,9 +116,13 @@ CI publishes `native-linux-x64.node`, `native-win32-x64.node` and
 binaries back out of the release. Verify before you load one:
 
 ```sh
-gh release download swarm-wallet-core-0.1.0-m1 -R Swarm-Official/swarm-wallet-core
+gh release download swarm-wallet-core-0.1.1 -R Swarm-Official/swarm-wallet-core
 sha256sum -c SHA256SUMS.txt
 ```
+
+Releases are cut by pushing a `build-<version>` tag; the workflow publishes to
+the release `swarm-wallet-core-<version>`. `CHANGELOG.md` says what each one
+changed. The addon binary is the same across 0.1.x — the TypeScript is what moved.
 
 A release and not the artifact store, because on 2026-09-26 the organisation's
 Actions artifact quota was exhausted and no artifact could be uploaded at all.
@@ -135,6 +139,13 @@ npm run typecheck && npm test     # no addon needed; it is mocked
 npm run neon                      # needs Rust 1.96.0 and protoc; writes ./native.node
 SWARM_WALLET_CORE_LIVE=1 npx vitest run test/live.test.ts
 ```
+
+The live test runs against **any** build of the addon — point
+`SWARM_WALLET_CORE_ADDON` at one, for example the `native.node` inside an
+installed SWARM Wallet (`resources/app.asar.unpacked/build/native.node`). It is the
+test that found every shape mismatch in 0.1.0, and the mocked suite cannot replace
+it: `test/fakeAddon.ts` answers what the addon was *observed* to answer, and an
+observation is what keeps it honest.
 
 The pieces that are not optional — Rust exactly `1.96.0`,
 `RUSTFLAGS='--cfg zcash_unstable="nu6.3"'`, `protoc` on PATH — and why, are in

@@ -19,6 +19,8 @@
  */
 export type ChainHint = string & { readonly __swarmChainHint: unique symbol };
 
+import type { SwarmWalletError } from "./errors.js";
+
 /** How hard the addon is allowed to work while syncing. */
 export type PerformanceLevel = "Maximum" | "High" | "Medium" | "Low";
 
@@ -32,18 +34,31 @@ export const ZATOSHI_PER_SWM = 100_000_000n;
  * carry them, `balance()` throws rather than returning a number. The per-pool
  * fields are `null` when the addon did not say, because a zero there would read
  * as "this pool is empty" when what is true is "this version cannot see it".
+ *
+ * The addon's `get_balance` (wallet `745c2092`, read from the mainnet.2 binary
+ * on 2026-09-27) reports each pool three ways — `confirmed_<pool>_balance`,
+ * `unconfirmed_<pool>_balance`, `total_<pool>_balance` — for `orchard`,
+ * `sapling`, `transparent` and `ironwood`. The per-pool fields here are the
+ * totals; `confirmedZat` sums the confirmed thirds.
  */
 export type Balance = {
   /** Everything the wallet can see, confirmed or not. */
   readonly totalZat: bigint;
   /** What can be spent right now, at the configured confirmation depth. */
   readonly spendableZat: bigint;
+  /**
+   * The confirmed part of `totalZat`, summed over the pools that reported one,
+   * or `null` when the addon reported no confirmed figure at all.
+   */
+  readonly confirmedZat: bigint | null;
   /** Shielded value in Orchard notes, or `null` when the addon did not report it. */
   readonly orchardZat: bigint | null;
   /** Shielded value in Sapling notes, or `null`. */
   readonly saplingZat: bigint | null;
   /** Unshielded value on transparent addresses, or `null`. */
   readonly transparentZat: bigint | null;
+  /** Shielded value in Ironwood (NU6.3) notes, or `null`. */
+  readonly ironwoodZat: bigint | null;
   /** Value received but not yet confirmed to the wallet's confirmation depth. */
   readonly pendingZat: bigint;
   /** The addon's own JSON, for anything this shape does not carry. */
@@ -70,16 +85,41 @@ export type ReceiverSelection = {
   readonly sapling?: boolean;
 };
 
+/**
+ * One block range in the sync's plan, as `status_sync` reports it.
+ *
+ * `pepper_sync::sync_status` answers `scan_ranges: [{priority, start_block,
+ * end_block}]` — the block numbers cross as **strings** — plus scanned-block and
+ * scanned-output counters. `"Scanned"` is the only priority that means done.
+ */
+export type ScanRange = {
+  readonly start: number;
+  readonly end: number;
+  /** `"Scanned"` when done; otherwise the sync's own word for what is pending. */
+  readonly priority: string;
+};
+
 /** Where the sync has got to. */
 export type SyncStatus = {
   /** Whether a sync task is running right now. */
   readonly syncing: boolean;
-  /** The height the wallet has scanned to, or `null` when it has not started. */
+  /**
+   * The height up to which every range is `Scanned`, or `null` when nothing
+   * has been scanned yet. Read out of `scan_ranges`, walking from the lowest
+   * range upwards and stopping at the first one that is not done.
+   */
   readonly syncedHeight: number | null;
-  /** The chain tip the wallet knows about, or `null`. */
+  /** The highest block in the sync's plan — the tip it knows about — or `null`. */
   readonly chainHeight: number | null;
-  /** 0 to 1, or `null` when the heights do not permit an honest fraction. */
+  /**
+   * 0 to 1, or `null` when the heights do not permit an honest fraction. The
+   * addon's own `percentage_total_blocks_scanned` when it reports one.
+   */
   readonly progress: number | null;
+  /** Blocks scanned so far in the wallet's life, or `null` when unreported. */
+  readonly blocksScanned: number | null;
+  /** Every range in the plan, lowest first. Empty before the first sync. */
+  readonly ranges: readonly ScanRange[];
   /** The addon's own JSON. */
   readonly raw: unknown;
 };
@@ -159,12 +199,29 @@ export type SendQuote = {
   confirm(): Promise<SendResult>;
 };
 
-/** A payment that has been transmitted. */
+/**
+ * A payment that has been transmitted.
+ *
+ * Once `confirm()` has resolved, the money has moved: the txids are the fact
+ * that matters and nothing that happens afterwards may lose them. The wallet
+ * file save that follows the transmit is therefore reported here rather than
+ * thrown — a throw after the transmit was how 0.1.0 lost the txids of a payment
+ * already on the network.
+ */
 export type SendResult = {
   /** Every transaction the send produced, in the order the SDK returned them. */
   readonly txids: readonly string[];
   /** The fee quoted for it. */
   readonly feeZat: bigint;
+  /**
+   * Whether the wallet file was saved and sealed after the transmit. When
+   * false, `saveError` says why; the spend is recorded in the addon's memory
+   * and in the chain, and the next successful save (`close()`, a later sync)
+   * writes it to disk. A caller that shows a payment as sent should still do so.
+   */
+  readonly saved: boolean;
+  /** The save failure, when `saved` is false. */
+  readonly saveError: SwarmWalletError | null;
 };
 
 /**
