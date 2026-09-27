@@ -354,10 +354,22 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     const transparent = await callAddon<unknown>("get_transparent_addresses", () =>
       this.#addon.get_transparent_addresses(),
     );
-    return {
+    const set: AddressSet = {
       unified: addressStrings(unified),
-      transparent: addressStrings(transparent),
+      // External only: `internal` is change and `refund` is a reserved swap
+      // address, and neither is something to show as "pay me here".
+      transparent: addressStrings(transparent, true),
     };
+    if (set.unified.length === 0) {
+      throw new SwarmWalletError(
+        "malformed-response",
+        `get_unified_addresses answered ${JSON.stringify(unified)}, from which no address could ` +
+          `be read. Every wallet has at least one unified address, so this is a shape this ` +
+          `version does not understand rather than an empty wallet.`,
+        { call: "get_unified_addresses" },
+      );
+    }
+    return set;
   }
 
   /**
@@ -992,13 +1004,26 @@ const numberOrNull = (value: unknown): number | null => {
 };
 
 /**
- * Pulls address strings out of whatever the addon answered.
+ * Pulls address strings out of what the addon answered.
  *
- * `unified_addresses_json` and `transparent_addresses_json` have both been an
- * array of strings and an array of `{address: …}` objects across SDK revisions,
- * so both are read rather than one being assumed.
+ * Both `unified_addresses_json` and `transparent_addresses_json` answer an array
+ * of OBJECTS, and the address is under **`encoded_address`**:
+ *
+ *   unified:      {account, address_index, encoded_address, has_orchard,
+ *                  has_sapling, has_transparent}
+ *   transparent:  {account, address_index, scope, encoded_address}
+ *
+ * Confirmed against the desktop wallet's own readers
+ * (`UnifiedAddressClass` / `TransparentAddressClass` in `src/components/appstate/classes/`).
+ * This looked for `address`, found nothing, and returned an empty list — so the
+ * live mainnet run opened a wallet and then reported it had no receive address.
+ *
+ * Transparent addresses carry a `scope`, and only `external` ones are addresses to
+ * be paid at: `internal` is change and `refund` is reserved for a swap refund.
+ * Handing either to a user as "your address" would publish a change address.
+ * Plain strings are still accepted, in case a future SDK simplifies the shape.
  */
-const addressStrings = (value: unknown): readonly string[] => {
+const addressStrings = (value: unknown, externalOnly = false): readonly string[] => {
   const list = Array.isArray(value)
     ? value
     : isRecord(value) && Array.isArray(value["addresses"])
@@ -1006,8 +1031,14 @@ const addressStrings = (value: unknown): readonly string[] => {
       : [];
   const out: string[] = [];
   for (const entry of list) {
-    if (typeof entry === "string") out.push(entry);
-    else if (isRecord(entry) && typeof entry["address"] === "string") out.push(entry["address"]);
+    if (typeof entry === "string") {
+      out.push(entry);
+      continue;
+    }
+    if (!isRecord(entry)) continue;
+    if (externalOnly && entry["scope"] !== undefined && entry["scope"] !== "external") continue;
+    const encoded = entry["encoded_address"] ?? entry["address"];
+    if (typeof encoded === "string") out.push(encoded);
   }
   return out;
 };

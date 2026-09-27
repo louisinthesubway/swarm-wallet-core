@@ -74,6 +74,8 @@ export const createFakeAddon = (
     "swm1qpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khce6mua7lqpzry9x8gf2tvdw0s3jn54khced2letk",
   ];
   const transparent = ["s1FakeTransparentAddressAaaaaaaaaaa"];
+  /** A change address. It must never be offered as somewhere to be paid. */
+  const transparentInternal = "s1FakeInternalChangeAddressBbbbbbb";
 
   const record = (name: string, ...args: unknown[]): void => {
     log.calls.push({ name, args });
@@ -252,12 +254,32 @@ export const createFakeAddon = (
 
     async get_unified_addresses(): Promise<string> {
       requireOpen("get_unified_addresses");
-      return JSON.stringify(unified);
+      // Objects with `encoded_address`, which is what the addon really answers.
+      // A fake that answered bare strings is why the live run opened a wallet and
+      // then reported it had no receive address.
+      return JSON.stringify(
+        unified.map((encoded_address, index) => ({
+          account: 0,
+          address_index: index,
+          encoded_address,
+          has_orchard: true,
+          has_sapling: true,
+          has_transparent: true,
+        })),
+      );
     },
 
     async get_transparent_addresses(): Promise<string> {
       requireOpen("get_transparent_addresses");
-      return JSON.stringify(transparent);
+      return JSON.stringify([
+        ...transparent.map((encoded_address, index) => ({
+          account: 0,
+          address_index: index,
+          scope: "external",
+          encoded_address,
+        })),
+        { account: 0, address_index: 0, scope: "internal", encoded_address: transparentInternal },
+      ]);
     },
 
     async create_new_unified_address(receivers: string): Promise<string> {

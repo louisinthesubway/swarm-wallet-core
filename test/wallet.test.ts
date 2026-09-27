@@ -302,11 +302,32 @@ describe("reading", () => {
     expect(await wallet.balanceText()).toBe("1.5 SWM");
   });
 
-  it("lists unified and transparent addresses apart", async () => {
+  it("reads the addresses out of encoded_address, which is where they are", async () => {
     const { wallet } = await open();
     const { unified, transparent } = await wallet.addresses();
     expect(unified[0]).toMatch(/^swm1/);
     expect(transparent[0]).toMatch(/^s1/);
+  });
+
+  it("leaves internal change addresses out of the transparent list", async () => {
+    // `scope` is external / internal / refund. Offering a change address as
+    // somewhere to be paid publishes the wallet's own bookkeeping.
+    const { wallet } = await open();
+    const { transparent } = await wallet.addresses();
+    expect(transparent).toHaveLength(1);
+    expect(transparent.join(" ")).not.toContain("Internal");
+  });
+
+  it("refuses an address list it cannot read, rather than saying there are none", async () => {
+    // Every wallet has a unified address, so an empty list is a shape this version
+    // does not understand. It used to come back as `unified: []`, which on a
+    // Receive screen reads as "this wallet cannot be paid".
+    const { wallet, addon } = await open();
+    const original = addon.get_unified_addresses;
+    addon.get_unified_addresses = async () =>
+      JSON.stringify([{ account: 0, ua: "swm1somethingElseEntirely" }]);
+    await expect(wallet.addresses()).rejects.toThrow(/no address could be read/);
+    addon.get_unified_addresses = original;
   });
 
   it("asks for both shielded receivers with the FLAG STRING the addon reads", async () => {
