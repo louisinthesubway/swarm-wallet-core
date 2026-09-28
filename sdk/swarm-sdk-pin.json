@@ -1,5 +1,5 @@
 {
-  "repository": "https://github.com/Swarm-Official/privacy-zingolib",
+  "repository": "https://github.com/louisinthesubway/privacy-zingolib",
   "branch": "codex/mainnet-sdk-identity-20260925",
   "tag": "swarm-sdk-mainnet-1",
   "commit": "c7464d2ec40a5d619500a9ebee76ac4c39775baa",
@@ -24,7 +24,7 @@
   },
   "status": "SwarmTestnet development build against the final genesis, whose block is stamped in the past so the chain can produce block 1 immediately, now carrying the SWARM production profile as well. Unsigned, not a release, and no wallet safety claim. This pin HAS been compiled: the native addon was built against it on Linux on the mainnet build host and on all four platforms in CI (see `verified`). SWARM production stays unselectable in this build - src/utils/networkProfiles.ts SWARM_MAINNET_GENESIS is still null, because the launch ceremony has not run.",
   "verified": [
-    "SDK rollback and compatibility CI passed at ef08aa25: https://github.com/Swarm-Official/privacy-zingolib/actions/runs/35994451073",
+    "SDK rollback and compatibility CI passed at ef08aa25: https://github.com/louisinthesubway/privacy-zingolib/actions/runs/35994451073",
     "Same-height reorg regression: fails before correction, passes after; 120 sync tests passed, 4 existing ignored",
     "Local feature sweep passed 25 combinations across pepper-sync, zingolib and CLI",
     "Encoding proof CI 35938381018: 2304 fixtures per protocol version, including client 0.10.5",

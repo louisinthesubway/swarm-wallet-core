@@ -119,7 +119,7 @@ CI publishes `native-linux-x64.node`, `native-win32-x64.node` and
 binaries back out of the release. Verify before you load one:
 
 ```sh
-gh release download swarm-wallet-core-0.1.1 -R Swarm-Official/swarm-wallet-core
+gh release download swarm-wallet-core-0.1.1 -R louisinthesubway/swarm-wallet-core
 sha256sum -c SHA256SUMS.txt
 ```
 
