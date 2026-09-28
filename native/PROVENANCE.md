@@ -100,3 +100,13 @@ unchanged, and it is the authority on how this compiles. The short version, as
 * `cargo-cp-artifact -a cdylib swarm-wallet-core-native native.node -- cargo build --release --manifest-path native/Cargo.toml`
   (the crate name is the one thing that differs from the wallet's `yarn neon`).
 * `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so the SDK revision fetch uses git.
+
+## Mirror change, 2026-09-28
+
+GitHub suspended the Swarm-Official account on 2026-09-28. To build again, the two
+git dependencies of `native/Cargo.toml` and `native/Cargo.lock` now point at the
+mirrors `louisinthesubway/privacy-zingolib` (same commit `c7464d2e`, tag
+`swarm-sdk-mainnet-1`) and `louisinthesubway/privacy-lightwallet-protocol-rust`
+(same commit `c9c13e46`). Nothing else under `native/` changed; the two rows in
+`PROVENANCE-FILES.tsv` were re-hashed for exactly these URL edits. The wallet's
+own copy of these files still names the Swarm-Official URLs.
