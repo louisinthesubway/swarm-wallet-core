@@ -17,7 +17,8 @@
  * so it is pointed at the restarted chain's server (the abandoned one no longer
  * answers). The chain HINT is the abandoned chain's, exactly as 0.2.0 sent it.
  *
- * Writes `<dir>/swarm-mainnet/swarm-wallet.dat` (plaintext, as 0.2.0 wrote it
+ * Two unified addresses (the first and one more) and the first transparent
+ * address are handed out. Writes `<dir>/swarm-mainnet/swarm-wallet.dat` (plaintext, as 0.2.0 wrote it
  * with no key) and `<dir>/fixture.json` with what the move must preserve:
  * birthday, every receive address, and the file's SHA-256. No key material.
  */
@@ -58,7 +59,8 @@ addon.init_from_seed(recovery.seed_phrase, OLD_BIRTHDAY, SERVER, HINT, "Low", 3,
 recovery = null;
 
 await addon.create_new_unified_address("oz");
-await addon.create_new_transparent_address();
+// No second transparent address: the addon refuses one until the first has
+// received funds (the BIP-44 gap rule), and this wallet is never funded.
 const saved = await addon.save_wallet_file();
 if (!/saved successfully/i.test(saved)) throw new Error(`save_wallet_file answered: ${saved}`);
 const seedInfo = JSON.parse(await addon.get_seed());
