@@ -83,7 +83,7 @@ describe("openOrCreate", () => {
   it("defaults to the SWARM production indexer and 3 confirmations", async () => {
     const { log } = await open();
     const args = argsOf(log, "init_new");
-    expect(args?.[0]).toBe("https://lwd-main.swarm.green:8443");
+    expect(args?.[0]).toBe("https://lwd-main.swarm.green:443");
     expect(args?.[2]).toBe("High");
     expect(args?.[3]).toBe(3);
   });
@@ -437,7 +437,9 @@ describe("reading", () => {
     ]);
     const { phrase, birthdayHeight } = await wallet.seedPhrase();
     expect(phrase.split(" ")).toHaveLength(24);
-    expect(birthdayHeight).toBe(1);
+    // A new SWARM Mainnet wallet is born at the tip (1000 in the fake) less the
+    // 100-block reorg margin since 0.3.0, not at the network's first block.
+    expect(birthdayHeight).toBe(900);
     // And nothing else asked the addon for it. (The previous version searched the
     // balance object for a seed word, which three fixed integers could never
     // contain — an assertion that cannot fail. What is worth checking is that

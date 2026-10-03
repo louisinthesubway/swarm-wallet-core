@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  SWARM_MAINNET_ABANDONED_GENESIS,
   SWARM_MAINNET_PROFILE,
   SWARM_TESTNET_PROFILE,
   chainHintFor,
@@ -46,10 +47,20 @@ describe("the chain hint the addon is given", () => {
     expect(nativeChainHint("swarm-mainnet")).toMatch(/^swarm-mainnet:[0-9a-f]{64}$/);
   });
 
-  it("carries the genesis SWARM actually launched from", () => {
+  it("carries the genesis of the chain SWARM was restarted from on 2026-10-02", () => {
     expect(SWARM_MAINNET_PROFILE.genesis).toBe(
+      "01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2",
+    );
+    expect(SWARM_MAINNET_PROFILE.defaultServer).toBe("https://lwd-main.swarm.green:443");
+  });
+
+  it("never opens the abandoned chain again", () => {
+    expect(SWARM_MAINNET_ABANDONED_GENESIS).toBe(
       "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd",
     );
+    expect(SWARM_MAINNET_PROFILE.genesis).not.toBe(SWARM_MAINNET_ABANDONED_GENESIS);
+    expect(nativeChainHint("swarm-mainnet")).not.toContain(SWARM_MAINNET_ABANDONED_GENESIS);
+    expect(SWARM_MAINNET_PROFILE.defaultServer).not.toContain(":8443");
   });
 
   it("is the bare label for SwarmTestnet, which is what the addon has always been sent", () => {
@@ -79,6 +90,7 @@ const NATIVES: Record<string, number> = {
   init_from_ufvk: 3,
   init_from_b64: 1,
   delete_wallet: 1,
+  move_wallet_to_restarted_chain: 0,
 };
 
 const sourceFiles = (dir: string): string[] =>

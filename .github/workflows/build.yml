@@ -26,9 +26,9 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Release to publish the three native.node binaries to'
+        description: 'Release to publish the four native.node binaries (and the package tgz) to, as a PRE-release'
         type: string
-        default: 'swarm-wallet-core-0.1.0-m1'
+        default: 'swarm-wallet-core-0.3.0'
   push:
     tags:
       # Deliberately NOT the `swarm-wallet-core-*` pattern: this workflow CREATES a
@@ -95,6 +95,12 @@ jobs:
           - platform: darwin-arm64
             runner: macos-14
             script: neon-mac-arm64
+          # Intel Macs, cross-compiled on the Apple-silicon runner exactly as the
+          # desktop wallet's own workflow does it (the macos-13 Intel pool is
+          # gone). The owner's rule: every Mac delivery covers both chips.
+          - platform: darwin-x64
+            runner: macos-14
+            script: neon-mac-x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     steps:
@@ -135,7 +141,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/target
-          key: swc-${{ matrix.platform }}-rust196-nu63-${{ hashFiles('native/Cargo.lock', 'native/src/lib.rs', 'sdk/swarm-sdk-pin.json') }}
+          key: swc-${{ matrix.platform }}-rust196-nu63-${{ hashFiles('native/Cargo.lock', 'native/src/*.rs', 'sdk/swarm-sdk-pin.json') }}
           restore-keys: swc-${{ matrix.platform }}-rust196-nu63-
 
       - name: Install the pinned Rust toolchain
@@ -143,6 +149,13 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal
           rustup default 1.96.0
           rustc --version
+
+      # darwin-x64 is built on an arm64 host, so the Intel standard library is
+      # not the host's and has to be asked for. `neon-mac-x64` names
+      # --target x86_64-apple-darwin; without this it fails outright.
+      - name: Add the Intel Rust target for the cross-build
+        if: matrix.platform == 'darwin-x64'
+        run: rustup target add x86_64-apple-darwin --toolchain 1.96.0
 
       - name: Install protoc (Linux)
         if: matrix.platform == 'linux-x64'
@@ -181,16 +194,21 @@ jobs:
           grep -rq 'SWARM_MAINNET_NAME' zingolib/src/config.rs
           echo "the pinned SDK carries the SWARM production profile"
 
-      - name: The pin file agrees with the launched network
+      # The chain SWARM Mainnet was restarted from on 2026-10-02. The abandoned
+      # genesis (01c34428...afdd, served on :8443 until then) must not be pinned.
+      - name: The pin file agrees with the restarted network
         shell: bash
         run: |
           set -euo pipefail
           node -e '
             const pin = require("./sdk/swarm-sdk-pin.json");
-            const expected = "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd";
+            const expected = "01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2";
+            const abandoned = "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd";
             if (pin.commit !== process.env.SWARM_SDK_REV) throw new Error("pin commit != workflow SWARM_SDK_REV");
-            if (pin.mainnet.genesis !== expected) throw new Error("pin mainnet genesis is not the launched genesis");
+            if (pin.mainnet.genesis !== expected) throw new Error("pin mainnet genesis is not the restarted genesis");
             if (pin.mainnet.chainHint !== "swarm-mainnet:" + expected) throw new Error("pin chain hint is wrong");
+            if (pin.mainnet.server !== "lwd-main.swarm.green:443") throw new Error("pin server is not :443");
+            if (pin.mainnet.abandonedGenesis !== abandoned) throw new Error("pin does not name the abandoned genesis");
             console.log("pin agrees: " + pin.mainnet.chainHint);
           '
 
@@ -199,6 +217,27 @@ jobs:
 
       - name: Build the addon
         run: npm run ${{ matrix.script }}
+
+      # The desktop wallet's own native tests for the restart move (copied with
+      # chain_restart.rs from privacy-wallet 8b73dbc3) and the chain hints, on
+      # the one platform here that builds for its own host with no --target, so
+      # the addon build's dependencies are reused. They use the published
+      # all-zero BIP-39 test vector inside the Rust source; nothing is printed.
+      - name: Native tests (chain restart move, chain hints)
+        if: matrix.platform == 'linux-x64'
+        run: cargo test --release --locked --manifest-path native/Cargo.toml --lib -- chain_restart_tests chain_hint_tests
+
+      - name: The addon is built for this platform's architecture (macOS)
+        if: startsWith(matrix.platform, 'darwin')
+        shell: bash
+        run: |
+          set -euo pipefail
+          archs="$(lipo -archs native.node)"
+          echo "native.node architectures: $archs"
+          case "${{ matrix.platform }}" in
+            darwin-arm64) test "$archs" = "arm64" ;;
+            darwin-x64) test "$archs" = "x86_64" ;;
+          esac
 
       # A build that rewrites the lock has changed what it resolved, and a CI run
       # that only says "exit 1" costs another hour to find out what. The diff is
@@ -223,46 +262,35 @@ jobs:
             native/target
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
-      # The bare label must be refused and the full hint accepted. This is the bug
-      # that cost the owner the first mainnet wallet creation, and it is checkable
-      # here with no network and — deliberately — with NO SEED PHRASE anywhere:
-      # `wallet_exists` goes through the same `construct_uri_load_config` and so
-      # the same `chain_type_from_hint`, and takes no key material at all. The
-      # project rule is that no recovery words appear in a commit or a log, and a
-      # published BIP-39 test vector is still recovery words.
-      - name: The addon loads and holds the chain-hint contract
+      # The bare label must be refused and the full hint accepted (the bug that
+      # cost the owner the first mainnet wallet creation), the genesis is the
+      # restarted chain's, and the restart move refuses what it must. No network
+      # and NO SEED PHRASE: see scripts/check-addon-contract.cjs.
+      - name: The addon loads and holds the chain-hint and restart contract
+        if: matrix.platform != 'darwin-x64'
+        run: node scripts/check-addon-contract.cjs native.node
+
+      # The Intel binary cannot be loaded by the runner's arm64 Node. Under
+      # Rosetta an x64 Node can, so the same check runs there when Rosetta can
+      # be had; when it cannot, the run says so loudly instead of passing quietly.
+      - name: Enable Rosetta for the Intel addon check
+        id: rosetta
+        if: matrix.platform == 'darwin-x64'
+        continue-on-error: true
+        run: softwareupdate --install-rosetta --agree-to-license
+      - name: The Intel addon loads under an x64 Node and holds the contract
+        if: matrix.platform == 'darwin-x64' && steps.rosetta.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
-          node -e '
-            const addon = require("./native.node");
-            for (const name of ["set_wallet_base_dir","wallet_exists","init_new","init_from_seed","init_from_b64","get_balance","send","confirm","parse_address","save_wallet_file","deinitialize"]) {
-              if (typeof addon[name] !== "function") throw new Error("addon has no " + name);
-            }
-            const genesis = "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd";
-            const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
-            const dir = fs.mkdtempSync(path.join(os.tmpdir(), "swc-hint-"));
-            if (!addon.set_wallet_base_dir(dir)) throw new Error("set_wallet_base_dir refused");
-            let bare = null;
-            try { addon.wallet_exists("", "swarm-mainnet", "Low", 3, "probe.dat"); }
-            catch (e) { bare = String(e.message || e); }
-            if (bare === null) throw new Error("the addon accepted the BARE label swarm-mainnet");
-            if (!/does not name a network/.test(bare)) throw new Error("unexpected refusal: " + bare);
-            console.log("bare label refused, as it must be");
-            const exists = addon.wallet_exists("", "swarm-mainnet:" + genesis, "Low", 3, "probe.dat");
-            if (exists !== false) throw new Error("wallet_exists answered " + exists + " for an empty directory");
-            console.log("full chain hint accepted: swarm-mainnet:" + genesis);
-            // And the genesis is load-bearing: a different one is a different chain.
-            const other = addon.wallet_exists("", "swarm-mainnet:" + "ab".repeat(32), "Low", 3, "probe.dat");
-            if (other !== false) throw new Error("wallet_exists answered " + other + " for another genesis");
-            for (const refused of ["mainnet", "swarm", "swarm-mainnet:", "swarm-mainnet:0", "swarm-mainnet:" + genesis.toUpperCase(), ""]) {
-              let threw = false;
-              try { addon.wallet_exists("", refused, "Low", 3, "probe.dat"); } catch { threw = true; }
-              if (!threw) throw new Error("the addon accepted the hint " + JSON.stringify(refused));
-            }
-            console.log("every malformed hint refused");
-            fs.rmSync(dir, { recursive: true, force: true });
-          '
+          curl -fsSLo node-x64.tar.gz https://nodejs.org/dist/v22.12.0/node-v22.12.0-darwin-x64.tar.gz
+          mkdir node-x64 && tar -xzf node-x64.tar.gz -C node-x64 --strip-components 1
+          file node-x64/bin/node
+          arch -x86_64 node-x64/bin/node -p 'process.arch'
+          arch -x86_64 node-x64/bin/node scripts/check-addon-contract.cjs native.node
+      - name: Say plainly that the Intel addon was never loaded
+        if: matrix.platform == 'darwin-x64' && steps.rosetta.outcome != 'success'
+        run: echo "::warning title=Intel addon not loaded::Rosetta 2 could not be installed on this arm64 runner, so the cross-built x86_64 native.node was never loaded. Its architecture is checked by lipo above, but no one has watched it load."
 
       - name: Record the hash of what was built
         shell: bash
@@ -297,11 +325,12 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            notes="The SWARM wallet addon, built from native/ (copied byte for byte from"
-            notes="$notes privacy-wallet a963fd8c) against SDK $SWARM_SDK_REV with Rust 1.96.0"
-            notes="$notes and RUSTFLAGS --cfg zcash_unstable=\"nu6.3\". A per-platform SHA-256"
-            notes="$notes file sits beside each binary, and SHA256SUMS.txt is added once all"
-            notes="$notes three are up. Unsigned, and not a wallet release."
+            notes="The SWARM wallet addon, built from native/ (privacy-wallet a963fd8c plus the"
+            notes="$notes chain-restart move of privacy-wallet 8b73dbc3, see native/PROVENANCE.md)"
+            notes="$notes against SDK $SWARM_SDK_REV with Rust 1.96.0 and RUSTFLAGS"
+            notes="$notes --cfg zcash_unstable=\"nu6.3\". A per-platform SHA-256 file sits beside"
+            notes="$notes each binary, and SHA256SUMS.txt is added once all four are up."
+            notes="$notes Unsigned, a PRE-release, and not a wallet release."
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
               --title "swarm-wallet-core addon - $TAG" \
@@ -314,16 +343,33 @@ jobs:
             --clobber
           echo "published native-${{ matrix.platform }}.node to release $TAG"
 
-      # Creates a wallet nobody funds, syncs it against lwd-main.swarm.green:8443,
-      # asserts a swm1 address and a zero balance, and never asks for the seed. No
-      # funds move: nothing here calls send.
+      # Creates a wallet nobody funds, syncs it against lwd-main.swarm.green:443,
+      # asserts a swm1 address, a birthday at the tip less 100 and a zero balance,
+      # and never prints the seed. Then makes a wallet the way 0.2.0 made it on the
+      # abandoned chain (with the published 0.2.0 Linux addon, in its own process,
+      # from a fresh random seed nobody sees) and proves the 0.3.0 move: backup
+      # byte-identical, same addresses, birthday 1, a sync from block 1, zero
+      # balance. No funds move: nothing here calls send.
       #
       # In THIS job, not a job of its own, because a separate job would have to
       # receive native.node as an artifact — and on 2026-09-26 the organisation's
       # artifact storage quota was exhausted, so no artifact could be uploaded at
       # all. The binary is already here; carrying it across a job boundary was
       # never load-bearing.
-      - name: Create a throwaway mainnet wallet and sync it
+      - name: Make an old-chain wallet with the 0.2.0 addon
+        if: ${{ matrix.platform == 'linux-x64' && (inputs.run_live_test == null || inputs.run_live_test) }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/addon-020"
+          gh release download swarm-wallet-core-0.2.0 --pattern native-linux-x64.node --dir "$RUNNER_TEMP/addon-020"
+          echo "a8df9375fd7fc9363a1bac43e6010812b15c516d560d384d0a5e282bdf1904a1  $RUNNER_TEMP/addon-020/native-linux-x64.node" | sha256sum -c -
+          node scripts/make-old-chain-fixture.mjs "$RUNNER_TEMP/addon-020/native-linux-x64.node" "$RUNNER_TEMP/old-chain-fixture"
+          echo "SWARM_WALLET_CORE_OLD_FIXTURE=$RUNNER_TEMP/old-chain-fixture" >> "$GITHUB_ENV"
+
+      - name: Create a throwaway mainnet wallet and sync it; move the old-chain wallet
         if: ${{ matrix.platform == 'linux-x64' && (inputs.run_live_test == null || inputs.run_live_test) }}
         env:
           SWARM_WALLET_CORE_LIVE: "1"
@@ -347,7 +393,7 @@ jobs:
             sdk/swarm-sdk-pin.json
           retention-days: 30
 
-  # Reads the three binaries back OUT of the release and hashes them there. That
+  # Reads the four binaries back OUT of the release and hashes them there. That
   # makes the sums a check of what was actually published, not a copy of what each
   # runner said it had, and it is the one place all three platforms meet now that
   # the artifact store cannot be used.
@@ -358,6 +404,22 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      # The package itself, packed from the same commit, so the messenger can
+      # vendor the tgz from the release rather than from someone's workstation.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+      - name: Pack the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          npm pack
+          ls -l swarm-wallet-core-*.tgz
+
       - name: Resolve the release tag
         shell: bash
         run: |
@@ -376,18 +438,21 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          tgz="$(ls swarm-wallet-core-*.tgz)"
+          gh release upload "$TAG" "$tgz" --clobber
           mkdir -p dl && cd dl
           gh release download "$TAG" --pattern 'native-*.node' --clobber
+          gh release download "$TAG" --pattern 'swarm-wallet-core-*.tgz' --clobber
           ls -l
-          sha256sum native-*.node | tee SHA256SUMS.txt
-          count="$(wc -l < SHA256SUMS.txt)"
+          sha256sum native-*.node swarm-wallet-core-*.tgz | tee SHA256SUMS.txt
+          count="$(ls native-*.node | wc -l)"
           # Said out loud rather than inferred from a missing line: a release with
-          # two binaries in it is not the release the messenger should build against,
-          # and the notes are where anyone looks first.
-          if [ "$count" -lt 3 ]; then
-            warning="**Incomplete: $count of 3 platforms published.** A platform build failed; see the run."
+          # three binaries in it is not the release the messenger should build
+          # against, and the notes are where anyone looks first.
+          if [ "$count" -lt 4 ]; then
+            warning="**Incomplete: $count of 4 platforms published.** A platform build failed; see the run."
           else
-            warning="All three platforms published."
+            warning="All four platforms published (Windows x64, Linux x64, macOS arm64, macOS x64)."
           fi
           {
             echo "### native.node, as published"
@@ -399,8 +464,9 @@ jobs:
             echo '```'
             echo
             echo "Source commit \`$GITHUB_SHA\`. Rust 1.96.0, RUSTFLAGS \`--cfg zcash_unstable=\"nu6.3\"\`,"
-            echo "SDK \`$SWARM_SDK_REV\`, addon source copied byte for byte from privacy-wallet \`745c2092\`."
-            echo "Unsigned. Verify with \`sha256sum -c SHA256SUMS.txt\`."
+            echo "SDK \`$SWARM_SDK_REV\`, addon source privacy-wallet \`a963fd8c\` plus the chain-restart move of \`8b73dbc3\` (native/PROVENANCE.md)."
+            echo "SWARM Mainnet genesis \`01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2\` (restarted 2026-10-02), server lwd-main.swarm.green:443."
+            echo "Unsigned PRE-release. Verify with \`sha256sum -c SHA256SUMS.txt\`."
           } > notes.md
           gh release upload "$TAG" SHA256SUMS.txt --clobber
           gh release edit "$TAG" --notes-file notes.md

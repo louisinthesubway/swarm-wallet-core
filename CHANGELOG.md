@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0 — 2026-10-03
+
+For the SWARM Mainnet **restarted on 2026-10-02** from genesis
+`01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2`, served by
+`lwd-main.swarm.green:443` (`:8443` and genesis `01c34428…afdd` are the abandoned
+chain and are no longer served). Name, label, prefixes and rules are unchanged.
+
+* **Pins**: `SWARM_MAINNET_GENESIS`, `SWARM_MAINNET_SERVER` (`:443`), new
+  `SWARM_MAINNET_ABANDONED_GENESIS`, `SWARM_MAINNET_ABANDONED_SERVER`,
+  `SWARM_MAINNET_RESTARTED_UTC`; `sdk/swarm-sdk-pin.json`'s `mainnet` block as the
+  desktop wallet writes it (manifest `swarm-mainnet-r2`, sha256 `40794956…7325`).
+  The SDK revision (`c7464d2e`, `swarm-sdk-mainnet-1`) is unchanged.
+* **The move** (native): `native/src/chain_restart.rs` copied byte for byte from
+  privacy-wallet `8b73dbc3`, and that commit's four `lib.rs` hunks — the
+  `move_wallet_to_restarted_chain` entry point and the new-wallet birthday —
+  ported exactly; `scripts/check-provenance.mjs` proves both. No change to
+  cryptography, key derivation or the SDK.
+* **The move** (package): `src/chainRestart.ts`, the network record
+  `<wallet>.network.json`, `openOrCreate` moving a SWARM Mainnet wallet whose
+  record does not name this genesis before it opens it (`restartMove`, the
+  notice sentence), `SwarmWallet.needsMoveToRestartedChain` and
+  `SwarmWallet.moveWalletToRestartedChain`, `restartedChain: "refuse"`,
+  `WalletStore.sealBackup` / `sealLeftoverBackups` so no plaintext backup stays
+  on disk in encrypted mode, `WalletPaths.networkRecordFile`.
+* **New wallets** on SWARM Mainnet are born at the tip less 100 blocks.
+* `loadNativeAddon` refuses an addon without `move_wallet_to_restarted_chain`.
+* **CI**: genesis/server checks for the restarted chain; a fourth platform,
+  **macOS x64** (cross-compiled on the arm64 runner, `lipo` checked, loaded under
+  Rosetta when available); the native `chain_restart_tests` and
+  `chain_hint_tests` on Linux; the live test also moves a wallet made with the
+  published 0.2.0 Linux addon and syncs it from block 1; the release is a
+  PRE-release that also carries the packed tgz.
+
 ## 0.2.0 — 2026-09-27
 
 The addon moves: `native/` is now the wallet at `a963fd8c` (branch

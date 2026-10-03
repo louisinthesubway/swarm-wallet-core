@@ -14,9 +14,19 @@
  */
 
 import { EventEmitter } from "node:events";
+import { basename } from "node:path";
 
 import { formatSwm, zatoshiFromJson } from "./amounts.js";
 import { checkAddressForProfile } from "./addressCheck.js";
+import {
+  CHAIN_RESTART_NOTICE,
+  currentRecord,
+  parseNativeRestartReport,
+  readNetworkRecord,
+  recordNeedsMove,
+  writeNetworkRecord,
+} from "./chainRestart.js";
+import type { ChainRestartReport } from "./chainRestart.js";
 import { SwarmWalletError, callAddon, callAddonText, parseAddonJson } from "./errors.js";
 import { nativeChainHint, swarmProfileFor } from "./networkProfiles.js";
 import type { SwarmNetworkProfile } from "./networkProfiles.js";
@@ -65,7 +75,19 @@ export type OpenOptions = {
    * test against a throwaway indexer.
    */
   readonly verifyServerIdentity?: boolean;
+  /**
+   * What to do with a SWARM Mainnet wallet file written on the chain abandoned
+   * on 2 October 2026 (`chainRestart.ts`). `"move"` (the default) moves it once,
+   * safely, before it is opened, and reports the move as `restartMove`.
+   * `"refuse"` throws a `wrong-chain` error instead and changes nothing, for a
+   * caller that wants to ask its user first and then call
+   * `SwarmWallet.moveWalletToRestartedChain`.
+   */
+  readonly restartedChain?: "move" | "refuse";
 };
+
+/** Which wallet file a restart check or move is about. No addon needed to ask. */
+export type WalletLocation = Pick<OpenOptions, "dataDir" | "chain" | "walletName" | "encryptionKey">;
 
 /** Restoring an existing seed rather than opening or creating a wallet. */
 export type RestoreOptions = OpenOptions & {
@@ -134,6 +156,13 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
 
   readonly store: WalletStore;
 
+  /**
+   * The chain-restart move `openOrCreate` made before opening this wallet, or
+   * `null` when none was needed. When it is not null, show its owner
+   * `restartMove.notice` once.
+   */
+  restartMove: ChainRestartReport | null = null;
+
   readonly #addon: NativeAddon;
 
   readonly #performanceLevel: PerformanceLevel;
@@ -186,6 +215,20 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
     const { wallet, existed } = await SwarmWallet.#prepare(options);
     try {
       if (existed) {
+        // Before the file is opened: once it is open, the addon's save task
+        // would write the abandoned chain's state back over a moved file.
+        if (await wallet.#needsMove()) {
+          if (options.restartedChain === "refuse") {
+            throw new SwarmWalletError(
+              "wrong-chain",
+              `the wallet at ${wallet.store.paths.encryptedFile ?? wallet.store.paths.workingFile} ` +
+                `was written on the SWARM Mainnet chain abandoned on 2 October 2026 and has to be ` +
+                `moved onto the restarted chain before it is opened. Nothing was changed. Call ` +
+                `SwarmWallet.moveWalletToRestartedChain, or open with restartedChain: "move".`,
+            );
+          }
+          wallet.restartMove = await wallet.#moveToRestartedChain();
+        }
         wallet.#init("init_from_b64", () =>
           wallet.#addon.init_from_b64(
             wallet.server,
@@ -206,6 +249,7 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
           ),
         );
         await wallet.#persist();
+        await wallet.#writeCurrentRecord();
       }
       // Inside the try: #afterInit makes a network call, so an unreachable or
       // slow indexer is the ordinary case, and its failure used to leave the
@@ -250,12 +294,58 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
         ),
       );
       await wallet.#persist();
+      await wallet.#writeCurrentRecord();
       await wallet.#afterInit(options);
     } catch (error) {
       await wallet.#abandon();
       throw error;
     }
     return wallet;
+  }
+
+  /**
+   * Whether the wallet at this location has to be moved onto the SWARM Mainnet
+   * chain restarted on 2 October 2026 before it is opened: it exists, it is a
+   * SWARM Mainnet wallet, and its network record does not name this build's
+   * genesis (0.2.0 wrote no record; every wallet it made is on the abandoned
+   * chain). Reads two file names and one small JSON file; no addon, no key, no
+   * network.
+   */
+  static async needsMoveToRestartedChain(location: WalletLocation): Promise<boolean> {
+    // Only the paths are needed, and they depend on WHETHER there is a key, not
+    // on the key: a zero placeholder keeps the real key from being copied into
+    // a store that is never opened and so never wipes it.
+    const store = new WalletStore({
+      dataDir: location.dataDir,
+      chain: location.chain,
+      ...(location.walletName === undefined ? {} : { walletName: location.walletName }),
+      ...(location.encryptionKey === undefined ? {} : { encryptionKey: new Uint8Array(32) }),
+    });
+    if (!(await store.exists())) return false;
+    return recordNeedsMove(location.chain, await readNetworkRecord(store.paths.networkRecordFile));
+  }
+
+  /**
+   * Moves the wallet at this location onto the restarted SWARM Mainnet chain,
+   * without opening it, and answers the report, or `null` when no move was
+   * needed. `openOrCreate` does the same by itself; this is for a caller that
+   * asked its user first. Needs the addon (the move is native) and, in
+   * encrypted mode, the key; makes no network call. Claims the process's one
+   * wallet slot for its duration, so it refuses while a wallet is open.
+   */
+  static async moveWalletToRestartedChain(options: OpenOptions): Promise<ChainRestartReport | null> {
+    const { wallet, existed } = await SwarmWallet.#prepare(options);
+    let report: ChainRestartReport | null = null;
+    try {
+      if (existed && (await wallet.#needsMove())) {
+        report = await wallet.#moveToRestartedChain();
+      }
+    } finally {
+      // The move sealed what it wrote; closing without a seal only wipes the
+      // plaintext working copy and frees the slot.
+      await wallet.#abandon();
+    }
+    return report;
   }
 
   /** The wallet currently open in this process, or `null`. */
@@ -973,6 +1063,77 @@ export class SwarmWallet extends EventEmitter<SwarmWalletEvents> {
       const message = cause instanceof Error ? cause.message : String(cause);
       throw new SwarmWalletError("addon", `${call}: ${message}`, { call, cause });
     }
+  }
+
+  /** Whether this (existing, not yet opened) wallet must be moved first. */
+  async #needsMove(): Promise<boolean> {
+    return recordNeedsMove(this.chain, await readNetworkRecord(this.store.paths.networkRecordFile));
+  }
+
+  /**
+   * The move itself. The store is open (in encrypted mode the working file is
+   * the decrypted wallet), the addon's base directory is this store's, and no
+   * wallet is loaded in the addon.
+   *
+   * Order, each step only after the one before it succeeded:
+   *  1. seal any plaintext backup an interrupted earlier move left behind;
+   *  2. the addon's move: backup, fresh wallet, every key and address checked,
+   *     atomic replace, read-back, or a throw with the file unchanged;
+   *  3. seal the moved working file (encrypted mode);
+   *  4. seal the backup and wipe its plaintext (encrypted mode);
+   *  5. write the record naming the restarted chain's genesis.
+   * A crash anywhere before 5 leaves no record, so the next open moves again,
+   * which is harmless: same keys, a second backup, nothing else.
+   */
+  async #moveToRestartedChain(): Promise<ChainRestartReport> {
+    const profile = this.profile;
+    if (!profile || profile.genesis === null) {
+      throw new SwarmWalletError("bad-argument", `${this.chain} is not a network that was restarted.`);
+    }
+    await this.store.sealLeftoverBackups();
+    let raw: string;
+    try {
+      raw = this.#addon.move_wallet_to_restarted_chain(
+        nativeChainHint(this.chain),
+        this.#performanceLevel,
+        this.#minConfirmations,
+        this.store.paths.walletName,
+      );
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new SwarmWalletError("wallet-file", `move_wallet_to_restarted_chain: ${message}`, {
+        call: "move_wallet_to_restarted_chain",
+        cause,
+      });
+    }
+    const native = parseNativeRestartReport(parseAddonJson(raw, "move_wallet_to_restarted_chain"));
+    await this.store.save();
+    const backupPath = await this.store.sealBackup(native.backupPath);
+    const backupEncrypted = backupPath !== native.backupPath;
+    const record = currentRecord(profile, {
+      movedUtc: new Date().toISOString(),
+      backupFile: basename(backupPath),
+      backupEncrypted,
+      previousBirthday: native.previousBirthday,
+      birthday: native.birthday,
+    });
+    if (record !== null) await writeNetworkRecord(this.store.paths.networkRecordFile, record);
+    return {
+      ...native,
+      backupPath,
+      backupEncrypted,
+      genesis: profile.genesis,
+      notice: CHAIN_RESTART_NOTICE,
+    };
+  }
+
+  /**
+   * Records that this wallet file belongs to the current chain: after a create
+   * or a restore, which build the wallet from keys against this build's genesis.
+   */
+  async #writeCurrentRecord(): Promise<void> {
+    const record = this.profile ? currentRecord(this.profile) : null;
+    if (record !== null) await writeNetworkRecord(this.store.paths.networkRecordFile, record);
   }
 
   /** Checks the server is the chain it claims, then wires the profile's rules. */

@@ -11,10 +11,11 @@ holds the wallet file; the messenger's server never sees it.
 | | |
 | --- | --- |
 | Network | SWARM mainnet — chain label `swarm-mainnet`, ticker `SWM` |
-| Genesis | `01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd` |
-| Indexer | `lwd-main.swarm.green:8443` (TLS) |
+| Genesis | `01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2` (the chain restarted on 2026-10-02) |
+| Indexer | `lwd-main.swarm.green:443` (TLS) |
+| Abandoned chain | `01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd`, served on `:8443` until 2026-10-02; wallets written on it are moved once (below) |
 | Addresses | unified `swm1…`, transparent `s1…` / `s3…`, TEX `texswm1…` |
-| Addon source | `Swarm-Official/privacy-wallet` @ `a963fd8c`, copied byte for byte — see [`native/PROVENANCE.md`](native/PROVENANCE.md) |
+| Addon source | `Swarm-Official/privacy-wallet` @ `a963fd8c`, copied byte for byte, plus the chain-restart move of `8b73dbc3` — see [`native/PROVENANCE.md`](native/PROVENANCE.md) |
 | SDK | `Swarm-Official/privacy-zingolib` @ `c7464d2e…` (tag `swarm-sdk-mainnet-1`), by revision — see [`sdk/swarm-sdk-pin.json`](sdk/swarm-sdk-pin.json) |
 
 ## Using it
@@ -95,6 +96,42 @@ against `lwd-main.swarm.green`. An indexer that does not state a genesis answers
 the empty string; that reads as `genesisHash: null` and `genesisVerified: false`,
 never as a mismatch. Through the 0.1.x addon the field did not exist and the flag
 was always false.
+
+## The network restart of 2 October 2026 (0.3.0)
+
+SWARM Mainnet was restarted from a new genesis on 2026-10-02. Its name, label,
+address prefixes and rules are unchanged, so a wallet file written by 0.2.0 still
+opens, but it holds the abandoned chain's balances, history, scan state and
+possibly a birthday above the new chain's tip. 0.3.0 takes the desktop wallet's
+design (privacy-wallet `8b73dbc3`) unchanged:
+
+* Every wallet gets a small record beside its file,
+  `<wallet name>.network.json`, naming the chain and the genesis its state
+  belongs to. No key material is in it.
+* A SWARM Mainnet wallet whose record does not name this build's genesis — every
+  0.2.0 wallet has no record at all — is **moved once, before it is opened**, by
+  the addon's `move_wallet_to_restarted_chain`: the file is copied byte for byte
+  to `<file>.before-network-restart-<unix>.bak` and read back; a fresh wallet is
+  built from the same recovery phrase (or viewing key) with its birthday at the
+  new chain's first block; every unified and transparent receive address is
+  handed out again and compared; the file is replaced atomically and read back.
+  Any failure leaves the file exactly as it was and the wallet unopened.
+* In encrypted mode the addon's plaintext backup is sealed with the wallet's own
+  key (`.bak.enc`), checked to open to the same bytes, and the plaintext wiped:
+  the move leaves no seed in the clear on disk.
+* `openOrCreate` does this by itself and reports it as `wallet.restartMove`;
+  when that is not `null`, show its owner `restartMove.notice` once:
+  *"The SWARM network was restarted on 2 October 2026. Your addresses and
+  recovery phrase are unchanged; balances start again from the new chain."*
+  `SwarmWallet.needsMoveToRestartedChain(location)` asks without opening
+  anything, `SwarmWallet.moveWalletToRestartedChain(options)` moves without
+  opening, and `restartedChain: "refuse"` makes `openOrCreate` throw
+  `wrong-chain` instead of moving.
+* A **new** SWARM Mainnet wallet is born at the server's tip less 100 blocks
+  (never below block 1), as upstream's `NewSeed` does elsewhere, instead of at
+  block 1.
+
+`loadNativeAddon` refuses a 0.2.0 `native.node`: it cannot move a wallet.
 
 ## Wallet file protection
 

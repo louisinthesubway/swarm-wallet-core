@@ -15,6 +15,8 @@ extern "C" {
 #[cfg(test)]
 mod lock_discipline_tests;
 
+mod chain_restart;
+
 /// How long a single indexer request may take before it is abandoned.
 const INDEXER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -128,6 +130,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("init_from_seed", init_from_seed)?;
     cx.export_function("init_from_ufvk", init_from_ufvk)?;
     cx.export_function("init_from_b64", init_from_b64)?;
+    cx.export_function("move_wallet_to_restarted_chain", move_wallet_to_restarted_chain)?;
     cx.export_function("save_wallet_file", save_wallet_file)?;
     cx.export_function("check_save_error", check_save_error)?;
     cx.export_function("get_developer_donation_address", get_developer_donation_address)?;
@@ -765,10 +768,11 @@ fn init_new(mut cx: FunctionContext) -> JsResult<JsString> {
 
     let res: Result<String, ZingolibError> = with_panic_guard(|| {
         reset_lightclient();
+        let chain_type = chain_type_from_hint(&chain_hint)?;
         let (builder, wallet_settings, lightwalletd_uri) =
             construct_uri_load_config(server_uri, chain_hint, performance_level, min_confirmations, wallet_name)?;
-        // Fetch the current chain tip from the server; the NewSeed wallet
-        // derives its birthday from this height (chain_height - 100).
+        // Fetch the current chain tip from the server; the new wallet derives
+        // its birthday from this height (chain_height - 100).
         let chain_height = RT.block_on(async move {
             // `GetClientError::Transport` is `transparent` over tonic's
             // `transport::Error`, whose Display is the bare words "transport
@@ -784,12 +788,28 @@ fn init_new(mut cx: FunctionContext) -> JsResult<JsString> {
                 .map_err(|e| cause_chain(&e))
         })
         .map_err(ZingolibError::Init)?;
-        let config = builder
-            .set_wallet_config(WalletConfig::NewSeed {
-                no_of_accounts: NonZeroU32::try_from(1).expect("hard-coded integer"),
+        let no_of_accounts = NonZeroU32::try_from(1).expect("hard-coded integer");
+        // SWARM Mainnet: the SDK's `NewSeed` would give the wallet the
+        // network's first block as its birthday whatever the chain's height.
+        // A new wallet is born at the height the server just reported, less
+        // upstream's reorg margin (chain_restart::new_wallet_birthday), with
+        // a phrase generated exactly as `NewSeed` generates it. Every other
+        // network keeps `NewSeed`.
+        let wallet_config = match chain_restart::new_wallet_birthday(&chain_type, chain_height) {
+            Some(birthday) => WalletConfig::MnemonicPhrase {
+                mnemonic_phrase: Mnemonic::<bip0039::English>::generate(bip0039::Count::Words24).into_phrase(),
+                no_of_accounts,
+                birthday,
+                wallet_settings,
+            },
+            None => WalletConfig::NewSeed {
+                no_of_accounts,
                 chain_height,
                 wallet_settings,
-            })
+            },
+        };
+        let config = builder
+            .set_wallet_config(wallet_config)
             .build()
             .map_err(|e| ZingolibError::Init(cause_chain(&e)))?;
         let mut lightclient = match RT.block_on(async { LightClient::new(config, false).await }) {
@@ -937,6 +957,67 @@ fn init_from_b64(mut cx: FunctionContext) -> JsResult<JsString> {
         let _ = store_client(lightclient);
 
         if has_seed { get_seed_string() } else { get_ufvk_string() }
+    });
+
+    match res {
+        Ok(v) => Ok(cx.string(v)),
+        Err(e) => cx.throw_error(e.to_string()),
+    }
+}
+
+/// Moves a SWARM Mainnet wallet file written on the abandoned chain onto the
+/// restarted one: same keys, same addresses, birthday at the new chain's first
+/// block, nothing of the old chain's state, and a byte-identical backup of the
+/// old file beside it. See `chain_restart.rs`.
+///
+/// Offline: it reads and writes one file and dials nothing. The renderer calls
+/// it once, before `init_from_b64`, for a wallet whose record does not carry
+/// this build's genesis, and opens the wallet afterwards as usual. Answers a
+/// JSON report with the backup's path; no key material crosses.
+fn move_wallet_to_restarted_chain(mut cx: FunctionContext) -> JsResult<JsString> {
+    let chain_hint = cx.argument::<JsString>(0)?.value(&mut cx);
+    let performance_level = cx.argument::<JsString>(1)?.value(&mut cx);
+    let min_confirmations = cx.argument::<JsNumber>(2)?.value(&mut cx);
+    let wallet_name = cx.argument::<JsString>(3)?.value(&mut cx);
+
+    let res: Result<String, ZingolibError> = with_panic_guard(|| {
+        let (builder, wallet_settings, _uri) =
+            construct_uri_load_config(String::new(), chain_hint, performance_level, min_confirmations, wallet_name)?;
+        let config = builder
+            .set_wallet_config(WalletConfig::Read)
+            .build()
+            .map_err(|e| ZingolibError::Init(cause_chain(&e)))?;
+        let wallet_path = config.get_wallet_path().to_path_buf();
+
+        // Nothing may write this file behind the move. A client still held
+        // here has a save task that outlives it, so stop that task first; if
+        // it is this very file and the task will not stop, refuse.
+        let previous = with_lightclient_write(|slot| slot.take());
+        if let Some(mut client) = previous {
+            let same_file = client.wallet_path() == wallet_path;
+            if let Err(e) = RT.block_on(client.shutdown_save_task()) {
+                if same_file {
+                    return Err(ZingolibError::Init(format!(
+                        "the open wallet's saver would not stop ({e}); nothing was changed"
+                    )));
+                }
+            }
+        }
+        reset_lightclient();
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        chain_restart::move_to_restarted_chain(
+            &wallet_path,
+            config.chain_type(),
+            wallet_settings,
+            now_unix,
+            write_to_path,
+        )
+        .map(|report| report.to_json())
+        .map_err(|e| ZingolibError::Init(format!("moving the wallet to the restarted SWARM network: {e}")))
     });
 
     match res {

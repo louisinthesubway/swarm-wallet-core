@@ -38,13 +38,17 @@
     "state": "LAUNCHED",
     "chainLabel": "swarm-mainnet",
     "sdkChainType": "ChainType::SwarmMainnet(SwarmMainnetGenesis)",
-    "genesis": "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd",
-    "server": "lwd-main.swarm.green:8443",
+    "genesis": "01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2",
+    "server": "lwd-main.swarm.green:443",
     "serverIsLive": true,
-    "genesisTimeUtc": "2026-09-26T12:19:57Z",
-    "manifestSource": "D:/privacy/network/swarm-mainnet/manifest.json",
-    "manifestSha256": "c5ee6cf83985a529a46d32366eae82d939c23c2b38ffb85541b74c1e96f76d25",
-    "chainHint": "swarm-mainnet:01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd",
-    "note": "Set by scripts/set-swarm-mainnet-launch.js from the launch-ceremony manifest. The chain hint is what the addon is given; ChainType::try_from(\"swarm-mainnet\") without a genesis remains an error."
+    "genesisTimeUtc": "2026-10-02T15:41:37Z",
+    "manifestSource": "D:/privacy/network/swarm-mainnet-r2/manifest.json",
+    "manifestSha256": "40794956b04e958cdfef2a18fdda628355287767c3f8dc6eb20c1e7ecb387325",
+    "chainHint": "swarm-mainnet:01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2",
+    "note": "Set by scripts/set-swarm-mainnet-launch.js from the launch-ceremony manifest. The chain hint is what the addon is given; ChainType::try_from(\"swarm-mainnet\") without a genesis remains an error.",
+    "restartedUtc": "2026-10-02T15:41:37Z",
+    "abandonedGenesis": "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd",
+    "abandonedServer": "lwd-main.swarm.green:8443",
+    "restartNote": "SWARM Mainnet was restarted on 2026-10-02 from a new genesis; name, label, magic, prefixes, transaction domain and consensus parameters are unchanged. The SDK pin is unchanged too: c7464d2e carries no SWARM Mainnet genesis, checkpoint or tree state of its own (the old hash appears only in its docs and tests) and the wallet file stores the chain tag, not the genesis. Wallets made on the abandoned chain are moved once by native move_wallet_to_restarted_chain (native/src/chain_restart.rs; in swarm-wallet-core src/chainRestart.ts, in the desktop wallet src/utils/chainRestart.ts)."
   }
 }

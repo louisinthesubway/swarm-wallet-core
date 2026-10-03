@@ -75,7 +75,8 @@ no genesis, so `ServerInfo.genesisVerified` was always false. At `a963fd8c`
 (0.2.0) it has a tenth, **`genesis_hash`**: the height-zero block hash the server
 states (SDK `swarm-sdk-mainnet-1`, `LightdInfo.genesisHash` field 19), or `""`
 when the server did not state one — which a reader must treat as unknown, never
-as a mismatch. `lwd-main.swarm.green` states `01c34428…afdd`. There is still no
+as a mismatch. `lwd-main.swarm.green` stated `01c34428…afdd` until the
+restart of 2026-10-02 and states `01b76d8a…eff2` on `:443` since. There is still no
 `block_height`; the height is `latest_block_height`.
 
 **`parse_address` cannot decode SWARM addresses.** It tries `ChainType::Mainnet`,

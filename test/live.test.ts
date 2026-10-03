@@ -5,9 +5,16 @@
  * and no compiled addon. In CI it runs on Linux, after `native.node` is built.
  *
  * What it proves, and it is the only thing that can prove it: that the addon this
- * package builds opens a wallet on the chain SWARM actually launched — the right
- * genesis, the right address prefix, a real sync against
- * `lwd-main.swarm.green:8443`.
+ * package builds opens a wallet on the chain SWARM runs — since the restart of
+ * 2 October 2026 the genesis `01b76d8a…eff2` — with the right address prefix, a
+ * new wallet's birthday at the tip less 100 blocks, and a real sync against
+ * `lwd-main.swarm.green:443`.
+ *
+ * With `SWARM_WALLET_CORE_OLD_FIXTURE=<dir>` (made by
+ * `scripts/make-old-chain-fixture.mjs` with the 0.2.0 addon) it also proves the
+ * move: a wallet file written on the abandoned chain is moved once — backup
+ * identical to the old file, same addresses, birthday at block 1 — and then
+ * syncs from block 1 to the tip with a zero balance.
  *
  * What it must never do:
  *
@@ -20,7 +27,8 @@
  *   removed afterwards, ciphertext and all.
  */
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createDecipheriv, createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -28,6 +36,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { CHAIN_RESTART_NOTICE, readNetworkRecord } from "../src/chainRestart.js";
 import { SwarmWallet } from "../src/wallet.js";
 import { WalletStore } from "../src/walletStore.js";
 import { loadNativeAddon } from "../src/nativeAddon.js";
@@ -142,7 +151,18 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
     // is looked at, and nothing about it goes into `output`.
     const recovery = await wallet.seedPhrase();
     expect(recovery.phrase.trim().split(/\s+/)).toHaveLength(24);
-    expect(recovery.birthdayHeight).toBeGreaterThan(0);
+    // Since 0.3.0 a new SWARM Mainnet wallet is born at the tip the server
+    // reported at creation less 100 blocks (never below block 1), not at block
+    // 1. The tip can only have grown since, by a few blocks at 75 s each.
+    const tip = info.blockHeight!;
+    say(`new wallet birthday ${recovery.birthdayHeight} at server tip ${tip}`);
+    expect(recovery.birthdayHeight).toBeLessThanOrEqual(Math.max(1, tip - 100));
+    expect(recovery.birthdayHeight).toBeGreaterThanOrEqual(Math.max(1, tip - 100 - 10));
+
+    // The record beside the file names the restarted chain, so it is never moved.
+    const record = await readNetworkRecord(wallet.store.paths.networkRecordFile);
+    expect(record?.genesis).toBe(SWARM_MAINNET_GENESIS);
+    expect(wallet.restartMove).toBeNull();
 
     let lastProgress = -1;
     wallet.on("status", (status) => {
@@ -186,6 +206,107 @@ describe.skipIf(!live)("against SWARM mainnet", () => {
     expect(existsSync(closed.store.paths.workingFile)).toBe(false);
     expect(existsSync(closed.store.paths.encryptedFile!)).toBe(true);
   }, 900_000);
+
+  const fixtureDir = process.env["SWARM_WALLET_CORE_OLD_FIXTURE"];
+
+  it.skipIf(!fixtureDir)(
+    "moves a wallet written by 0.2.0 on the abandoned chain, then syncs it from block 1",
+    async () => {
+      const fixture = JSON.parse(await readFile(join(fixtureDir!, "fixture.json"), "utf8")) as {
+        birthday: number;
+        unified: string[];
+        transparent: string[];
+        file: string;
+        sha256: string;
+      };
+      const original = await readFile(join(fixtureDir!, fixture.file));
+      expect(createHash("sha256").update(original).digest("hex")).toBe(fixture.sha256);
+      say(`old-chain fixture: birthday ${fixture.birthday}, ${fixture.unified.length} unified addresses`);
+
+      // A copy, so the fixture itself is never touched, beside the first
+      // test's wallet: one addon per process, and its base directory is a
+      // OnceCell already pointed at `dataDir`. Opened in ENCRYPTED mode with a
+      // fresh key, so the plaintext 0.2.0 file is adopted (sealed) and then
+      // moved, and the backup must come out sealed too.
+      const walletName = "old-chain.dat";
+      await mkdir(join(dataDir, "swarm-mainnet"), { recursive: true });
+      await copyFile(join(fixtureDir!, fixture.file), join(dataDir, "swarm-mainnet", walletName));
+      const walletKey = WalletStore.generateKey();
+      // Plaintext 0.2.0 file, no record: a move is due.
+      expect(
+        await SwarmWallet.needsMoveToRestartedChain({ dataDir, chain: "swarm-mainnet", walletName }),
+      ).toBe(true);
+      {
+        const moved = await SwarmWallet.openOrCreate({
+          addon,
+          dataDir,
+          chain: "swarm-mainnet",
+          walletName,
+          encryptionKey: walletKey,
+          performanceLevel: "Low",
+        });
+        wallet = moved;
+        const report = moved.restartMove;
+        expect(report, "the 0.2.0 wallet was not moved").not.toBeNull();
+        say(
+          `moved: birthday ${report!.previousBirthday} -> ${report!.birthday}, ` +
+            `${report!.unifiedAddresses} unified + ${report!.transparentAddresses} transparent ` +
+            `addresses re-derived, backup sealed=${report!.backupEncrypted}`,
+        );
+        expect(report!.notice).toBe(CHAIN_RESTART_NOTICE);
+        expect(report!.previousBirthday).toBe(fixture.birthday);
+        expect(report!.birthday).toBe(1);
+        expect(report!.backupEncrypted).toBe(true);
+
+        // The backup opens to the 0.2.0 file, byte for byte.
+        const sealed = await readFile(report!.backupPath);
+        const magic = Buffer.from("SWMWALLET1", "ascii");
+        const nonce = sealed.subarray(magic.length, magic.length + 12);
+        const decipher = createDecipheriv("aes-256-gcm", walletKey, nonce);
+        decipher.setAAD(Buffer.concat([magic, nonce]));
+        decipher.setAuthTag(sealed.subarray(magic.length + 12, magic.length + 28));
+        const backup = Buffer.concat([
+          decipher.update(sealed.subarray(magic.length + 28)),
+          decipher.final(),
+        ]);
+        expect(createHash("sha256").update(backup).digest("hex")).toBe(fixture.sha256);
+        say(`backup sha256 ${fixture.sha256} matches the 0.2.0 file`);
+
+        // Same addresses, same order.
+        const addresses = await moved.addresses();
+        expect([...addresses.unified]).toEqual(fixture.unified);
+        expect([...addresses.transparent]).toEqual(fixture.transparent);
+        expect((await moved.seedPhrase()).birthdayHeight).toBe(1);
+
+        // The restarted chain, then a sync from block 1 to the tip.
+        const info = await moved.serverInfo();
+        expect(info.genesisHash).toBe(SWARM_MAINNET_GENESIS);
+        const synced = await moved.sync();
+        say(`moved wallet synced ${synced.ranges[0]?.start}..${synced.syncedHeight} of ${synced.chainHeight}`);
+        expect(synced.ranges[0]?.start).toBe(1);
+        expect(synced.syncedHeight).toBe(synced.chainHeight);
+        expect(synced.chainHeight!).toBeGreaterThanOrEqual(info.blockHeight!);
+        const balance = await moved.balance();
+        expect(balance.totalZat).toBe(0n);
+        expect(await moved.transactions()).toEqual([]);
+
+        await moved.close();
+        wallet = null;
+        expect((await readNetworkRecord(moved.store.paths.networkRecordFile))?.genesis).toBe(
+          SWARM_MAINNET_GENESIS,
+        );
+        expect(
+          await SwarmWallet.needsMoveToRestartedChain({
+            dataDir,
+            chain: "swarm-mainnet",
+            walletName,
+            encryptionKey: walletKey,
+          }),
+        ).toBe(false);
+      }
+    },
+    900_000,
+  );
 
   it("printed no seed phrase", () => {
     const everything = output.join("\n");

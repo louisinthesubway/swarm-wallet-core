@@ -58,7 +58,9 @@ export type NativeAddon = {
 
   /**
    * Creates a new wallet and returns its **seed phrase JSON**. The birthday is
-   * derived from the server's chain tip, so this call needs the network.
+   * derived from the server's chain tip, so this call needs the network. On
+   * SWARM Mainnet (since 0.3.0) it is the tip less 100 blocks, never below
+   * block 1; other networks keep the SDK's `NewSeed` rule.
    */
   init_new(
     server_uri: string,
@@ -82,6 +84,23 @@ export type NativeAddon = {
   /** Opens the wallet file already on disk. Returns the seed JSON. */
   init_from_b64(
     server_uri: string,
+    chain_hint: ChainHint,
+    performance_level: PerformanceLevel,
+    min_confirmations: number,
+    wallet_name: string,
+  ): string;
+
+  /**
+   * Moves a SWARM Mainnet wallet file written on the abandoned chain onto the
+   * chain restarted on 2026-10-02 (`native/src/chain_restart.rs`, from the
+   * desktop wallet at 8b73dbc3). Offline: it reads and writes one file and
+   * dials nothing. Answers a JSON report — `backup_path`, `previous_birthday`,
+   * `birthday`, `key_kind` ("seed" | "ufvk"), `unified_addresses`,
+   * `transparent_addresses`, `transparent_other_scopes` — and no key material.
+   * Throws, leaving the file unchanged, on any failure. Refuses every chain but
+   * SWARM Mainnet. New in 0.3.0.
+   */
+  move_wallet_to_restarted_chain(
     chain_hint: ChainHint,
     performance_level: PerformanceLevel,
     min_confirmations: number,
@@ -215,6 +234,13 @@ export const loadNativeAddon = (addonPath: string): NativeAddon => {
       `${addonPath} loaded but is not the SWARM wallet addon: it has no init_new. ` +
         `A wrong-architecture build loads and then fails on every call, which is ` +
         `indistinguishable from a broken wallet unless it is caught here.`,
+    );
+  }
+  if (typeof addon.move_wallet_to_restarted_chain !== "function") {
+    throw new Error(
+      `${addonPath} is a SWARM wallet addon from before the network restart of 2 October 2026: ` +
+        `it has no move_wallet_to_restarted_chain. This package (0.3.0) needs the 0.3.0 addon, ` +
+        `which can move a wallet made on the abandoned chain onto the restarted one.`,
     );
   }
   return addon;

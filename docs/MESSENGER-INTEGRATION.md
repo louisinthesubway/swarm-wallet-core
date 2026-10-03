@@ -33,8 +33,14 @@ tree.
  │  <userData>/swarm-wallet/<ourAci>/swarm-mainnet/swarm-wallet.dat.enc │
  └──────────────────────────────────────┬───────────────────────────────┘
                                         │ gRPC over TLS
-                                  lwd-main.swarm.green:8443
+                                  lwd-main.swarm.green:443
 ```
+
+**Since 0.3.0 (SWARM Mainnet restarted 2026-10-02).** `openOrCreate` moves a
+wallet written on the abandoned chain once, before opening it, and sets
+`wallet.restartMove`; when it is not `null` the Wallet pane shows
+`restartMove.notice` once. Explorer links go to `https://explore.swarm.green`.
+The README section "The network restart of 2 October 2026" has the details.
 
 The wallet never talks to the chat server, and the chat server never sees a
 wallet key, a seed, an address or a balance. A payment notice travels **inside** an

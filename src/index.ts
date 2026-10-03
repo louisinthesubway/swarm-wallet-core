@@ -31,7 +31,17 @@
  */
 
 export { SwarmWallet } from "./wallet.js";
-export type { OpenOptions, RestoreOptions, SwarmWalletEvents } from "./wallet.js";
+export type { OpenOptions, RestoreOptions, SwarmWalletEvents, WalletLocation } from "./wallet.js";
+
+export {
+  CHAIN_RESTART_NOTICE,
+  CHAIN_RESTART_NOTICE_TITLE,
+  NETWORK_RECORD_SCHEMA,
+  networkRecordPath,
+  readNetworkRecord,
+  recordNeedsMove,
+} from "./chainRestart.js";
+export type { ChainRestartReport, NetworkRecord } from "./chainRestart.js";
 
 export { loadNativeAddon } from "./nativeAddon.js";
 export type { NativeAddon } from "./nativeAddon.js";
@@ -46,8 +56,11 @@ export { formatSwm, parseSwm, SWM_DECIMALS } from "./amounts.js";
 export type { FormatOptions } from "./amounts.js";
 
 export {
+  SWARM_MAINNET_ABANDONED_GENESIS,
+  SWARM_MAINNET_ABANDONED_SERVER,
   SWARM_MAINNET_GENESIS,
   SWARM_MAINNET_PROFILE,
+  SWARM_MAINNET_RESTARTED_UTC,
   SWARM_MAINNET_SERVER,
   SWARM_NETWORK_PROFILES,
   SWARM_TESTNET_PROFILE,

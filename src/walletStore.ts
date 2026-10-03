@@ -83,6 +83,7 @@ import {
   chmod,
   mkdir,
   open as openFile,
+  readdir,
   readFile,
   rename,
   stat,
@@ -91,6 +92,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+import { networkRecordPath } from "./chainRestart.js";
 import { SwarmWalletError } from "./errors.js";
 import { walletSubdirectoryFor } from "./networkProfiles.js";
 
@@ -131,6 +133,11 @@ export type WalletPaths = {
   readonly encryptedFile: string | null;
   /** The name to pass as the addon's `wallet_name` argument. */
   readonly walletName: string;
+  /**
+   * The record naming the chain and genesis the wallet file belongs to
+   * (`chainRestart.ts`). Plaintext JSON with no key material in it.
+   */
+  readonly networkRecordFile: string;
 };
 
 export class WalletStore {
@@ -170,6 +177,7 @@ export class WalletStore {
       walletName,
       workingFile: join(chainDir, walletName),
       encryptedFile: this.encrypted ? join(chainDir, `${walletName}.enc`) : null,
+      networkRecordFile: networkRecordPath(chainDir, walletName),
     };
   }
 
@@ -356,6 +364,76 @@ export class WalletStore {
     }
   }
 
+  /**
+   * Seals a plaintext backup the addon wrote beside the wallet file, and wipes
+   * the plaintext copy. Answers the path of what is now the backup.
+   *
+   * The addon's chain-restart move copies the working file byte for byte to
+   * `<file>.before-network-restart-<unix>.bak` — and in encrypted mode the
+   * working file is the decrypted wallet, so that copy is the seed in the
+   * clear, left on disk for good. Here it becomes `<that>.enc` in the same
+   * container as the wallet itself, under the same key, and is read back and
+   * decrypted before the plaintext is wiped: the sealed copy must open to the
+   * very bytes the addon copied, or the plaintext is left where it is and this
+   * throws.
+   *
+   * In plaintext mode the wallet itself is plaintext, so the backup is left as
+   * the addon wrote it and its path is answered unchanged.
+   */
+  async sealBackup(plaintextBackup: string): Promise<string> {
+    if (this.paths.encryptedFile === null) return plaintextBackup;
+    const sealedPath = `${plaintextBackup}.enc`;
+    const plaintext = await readFile(plaintextBackup);
+    try {
+      const sealed = this.#encrypt(plaintext);
+      const temp = `${sealedPath}.tmp`;
+      const handle = await openFile(temp, "w", 0o600);
+      try {
+        await handle.writeFile(sealed);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temp, sealedPath);
+      await syncDirectory(dirname(sealedPath));
+      const reopened = this.#decrypt(await readFile(sealedPath), sealedPath);
+      const same = reopened.length === plaintext.length && timingSafeEqual(reopened, plaintext);
+      reopened.fill(0);
+      if (!same) {
+        throw new SwarmWalletError(
+          "wallet-file",
+          `the sealed backup ${sealedPath} does not open to the bytes of ${plaintextBackup}; the ` +
+            `plaintext backup was left in place.`,
+        );
+      }
+    } finally {
+      plaintext.fill(0);
+    }
+    await this.#wipeFile(plaintextBackup);
+    return sealedPath;
+  }
+
+  /**
+   * Seals every plaintext chain-restart backup of THIS wallet that a crash left
+   * unsealed (encrypted mode only). Answers what it sealed.
+   */
+  async sealLeftoverBackups(): Promise<readonly string[]> {
+    if (this.paths.encryptedFile === null) return [];
+    const prefix = `${this.paths.walletName}.before-network-restart-`;
+    let names: string[];
+    try {
+      names = await readdir(this.paths.chainDir);
+    } catch {
+      return [];
+    }
+    const sealed: string[] = [];
+    for (const name of names.sort()) {
+      if (!name.startsWith(prefix) || !name.endsWith(".bak")) continue;
+      sealed.push(await this.sealBackup(join(this.paths.chainDir, name)));
+    }
+    return sealed;
+  }
+
   /** Generates a key for a caller that has nowhere to get one. */
   static generateKey(): Buffer {
     return randomBytes(WALLET_KEY_BYTES);
@@ -418,7 +496,11 @@ export class WalletStore {
   }
 
   async #wipeWorkingFile(): Promise<void> {
-    const { workingFile } = this.paths;
+    await this.#wipeFile(this.paths.workingFile);
+  }
+
+  /** Overwrites, truncates and unlinks a plaintext file. Absent is fine. */
+  async #wipeFile(workingFile: string): Promise<void> {
     try {
       const info = await stat(workingFile);
       if (info.size > 0) {

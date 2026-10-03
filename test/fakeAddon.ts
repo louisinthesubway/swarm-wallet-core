@@ -27,7 +27,7 @@
  * test that skips that step proves nothing about the sealing.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { ChainHint, PerformanceLevel } from "../src/types.js";
@@ -40,8 +40,9 @@ export type FakeAddonOptions = {
   /** What `info_server` reports as its chain label. Defaults to swarm-mainnet. */
   readonly serverChain?: string;
   /**
-   * What `info_server` reports as `genesis_hash`. Defaults to the launch genesis,
-   * which is what `lwd-main.swarm.green` states through the addon at `a963fd8c`.
+   * What `info_server` reports as `genesis_hash`. Defaults to the restarted
+   * chain's genesis, which is what `lwd-main.swarm.green:443` states since
+   * 2026-10-02.
    * `""` is what an indexer that predates the field answers.
    */
   readonly serverGenesis?: string;
@@ -69,6 +70,11 @@ export type FakeAddonOptions = {
    * plan, to keep the older shape readable.
    */
   readonly legacySyncStatus?: boolean;
+  /**
+   * Make `move_wallet_to_restarted_chain` throw this, leaving the file exactly
+   * as it was, as the real addon does on any failed check.
+   */
+  readonly moveError?: string;
 };
 
 /** What the fake recorded, so a test can assert on the arguments it was given. */
@@ -87,6 +93,8 @@ export const createFakeAddon = (
   let pollsLeft = options.syncPolls ?? 1;
   let proposalStored = false;
   let transmitted = false;
+  let birthday = 1;
+  let moveCounter = 0;
   // A real bech32m string with a valid checksum, so the wrapper's own
   // pre-check accepts it exactly as it would accept a real address. A
   // checksum-invalid placeholder here would make every send test fail for the
@@ -102,7 +110,7 @@ export const createFakeAddon = (
   const recoveryInfo = (): string =>
     JSON.stringify({
       seed_phrase: Array.from({ length: 24 }, () => "abandon").join(" "),
-      birthday: 1,
+      birthday,
       no_of_accounts: 1,
     });
   /** `unified_addresses_json`: objects, the string under `encoded_address`. */
@@ -132,6 +140,17 @@ export const createFakeAddon = (
       { account: 0, address_index: 0, scope: "internal", encoded_address: transparentInternal },
     ]);
 
+  /** Where the addon puts a wallet file for this hint and name. */
+  const walletPathFor = (chainHint: string, walletName: string): string => {
+    if (log.baseDir === null) throw new Error("wallet base directory was never set");
+    const subdirectory = chainHint.startsWith("swarm-mainnet")
+      ? "swarm-mainnet"
+      : chainHint === "swarm-testnet"
+        ? "swarm-testnet"
+        : "";
+    return subdirectory ? join(log.baseDir, subdirectory, walletName) : join(log.baseDir, walletName);
+  };
+
   const record = (name: string, ...args: unknown[]): void => {
     log.calls.push({ name, args });
   };
@@ -156,6 +175,9 @@ export const createFakeAddon = (
       ? join(log.baseDir, subdirectory, walletName)
       : join(log.baseDir, walletName);
     initialized = true;
+    // What the native init_new does on SWARM Mainnet since 0.3.0: the tip
+    // (1000 here) less the 100-block reorg margin.
+    birthday = name === "init_new" && chainHint.startsWith("swarm-mainnet") ? 900 : 1;
     return recoveryInfo();
   };
 
@@ -241,6 +263,49 @@ export const createFakeAddon = (
         minConfirmations,
         walletName,
       ]);
+    },
+
+    move_wallet_to_restarted_chain(
+      chainHint: ChainHint,
+      performance: PerformanceLevel,
+      minConfirmations: number,
+      walletName: string,
+    ): string {
+      record("move_wallet_to_restarted_chain", chainHint, performance, minConfirmations, walletName);
+      // The addon's own preconditions, in its order: SWARM Mainnet only, a file
+      // that exists, and nothing loaded that could write behind the move.
+      if (!String(chainHint).startsWith("swarm-mainnet:")) {
+        throw new Error(
+          "moving the wallet to the restarted SWARM network: only a SWARM Mainnet wallet is moved",
+        );
+      }
+      const path = walletPathFor(String(chainHint), walletName);
+      if (!existsSync(path)) {
+        throw new Error(`moving the wallet to the restarted SWARM network: there is no wallet file at ${path}`);
+      }
+      if (options.moveError) {
+        throw new Error(`moving the wallet to the restarted SWARM network: ${options.moveError}`);
+      }
+      initialized = false;
+      moveCounter += 1;
+      const original = readFileSync(path);
+      const backup = `${path}.before-network-restart-1790970000${moveCounter > 1 ? `-${moveCounter - 1}` : ""}.bak`;
+      writeFileSync(backup, original);
+      writeFileSync(path, `fake moved wallet, birthday 1, from ${original.length} bytes`);
+      // Pretty-printed, as `ChainRestartReport::to_json` writes it.
+      return JSON.stringify(
+        {
+          backup_path: backup,
+          previous_birthday: 6000,
+          birthday: 1,
+          key_kind: "seed",
+          unified_addresses: 3,
+          transparent_addresses: 2,
+          transparent_other_scopes: 0,
+        },
+        null,
+        2,
+      );
     },
 
     async save_wallet_file(): Promise<string> {
@@ -473,7 +538,7 @@ export const createFakeAddon = (
       return JSON.stringify({
         version: "fake",
         git_commit: "0000000",
-        server_uri: "https://lwd-main.swarm.green:8443/",
+        server_uri: "https://lwd-main.swarm.green:443/",
         vendor: "SWARM lightwalletd",
         taddr_support: true,
         chain_name: options.serverChain ?? "swarm-mainnet",

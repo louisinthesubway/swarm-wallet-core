@@ -16,8 +16,12 @@
  *  2. A profile with no genesis hash is not selectable. A wallet that synced
  *     against the wrong chain would write its state back over the right one.
  *
- * SWARM mainnet launched on 2026-09-26 at 12:19:57 UTC, so its genesis is a
- * fact here and not a plan.
+ * SWARM mainnet launched on 2026-09-26 at 12:19:57 UTC and was RESTARTED from a
+ * new genesis on 2026-10-02 (genesis time 15:41:37 UTC). Name, label, address
+ * prefixes and consensus rules are unchanged; the genesis and the indexer port
+ * are not. The restarted chain's genesis is a fact here and not a plan; the
+ * abandoned one is kept only so a wallet written on it can be recognised and
+ * moved (`chainRestart.ts`).
  */
 
 import type { ChainHint } from "./types.js";
@@ -37,12 +41,30 @@ export type SwarmProfileId = (typeof SwarmProfileId)[keyof typeof SwarmProfileId
  */
 export type ChainLabel = "swarm-mainnet" | "swarm-testnet" | "main" | "test" | "regtest";
 
-/** The genesis block hash of the SWARM production network, in display order. */
+/**
+ * The genesis block hash of the SWARM production network, in display order:
+ * the chain restarted on 2026-10-02 (manifest `network/swarm-mainnet-r2`,
+ * sha256 40794956…7325).
+ */
 export const SWARM_MAINNET_GENESIS =
+  "01b76d8a0f18c502b23ab6605e26296d189aa5770fc4a34155e5c7b250a0eff2";
+
+/** The lightwalletd the SWARM production network runs on. TLS, port 443. */
+export const SWARM_MAINNET_SERVER = "https://lwd-main.swarm.green:443";
+
+/**
+ * The genesis of the SWARM Mainnet chain that was abandoned on 2026-10-02. No
+ * wallet is ever opened against it again. It is here so that a record naming it
+ * reads as "written on the abandoned chain" rather than as an unknown network.
+ */
+export const SWARM_MAINNET_ABANDONED_GENESIS =
   "01c34428b9e67cdd8345e0b365aaa37dd8d2d65d3869e0e5d77d567f2c39afdd";
 
-/** The lightwalletd the SWARM production network runs on. TLS, port 8443. */
-export const SWARM_MAINNET_SERVER = "https://lwd-main.swarm.green:8443";
+/** The indexer the abandoned chain was served from. It no longer answers. */
+export const SWARM_MAINNET_ABANDONED_SERVER = "https://lwd-main.swarm.green:8443";
+
+/** When SWARM Mainnet was restarted: the new genesis block's time. */
+export const SWARM_MAINNET_RESTARTED_UTC = "2026-10-02T15:41:37Z";
 
 /** The lightwalletd SwarmTestnet runs on. */
 export const SWARM_TESTNET_SERVER = "https://lwd.swarm.green:443";

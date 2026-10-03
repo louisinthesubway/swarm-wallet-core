@@ -110,3 +110,36 @@ mirrors `louisinthesubway/privacy-zingolib` (same commit `c7464d2e`, tag
 (same commit `c9c13e46`). Nothing else under `native/` changed; the two rows in
 `PROVENANCE-FILES.tsv` were re-hashed for exactly these URL edits. The wallet's
 own copy of these files still names the Swarm-Official URLs.
+
+## Chain-restart port, 2026-10-03 (0.3.0)
+
+SWARM Mainnet was restarted on 2026-10-02 from genesis `01b76d8a…eff2`. The
+desktop wallet carries the move of an old-chain wallet file onto the new chain
+in `privacy-wallet` commit `8b73dbc3` (*"Release the wallet for the restarted
+SWARM network: 0.1.0-mainnet.10"*, branch `relaunch/wallet-mainnet10`, checkout
+`C:/Users/o5o-o/swarm-work/wallet-mainnet10-src`). Re-copying `native/` from
+that commit wholesale would also bring the Treasury custody crate
+(`treasury-core`, `zebra-chain`, `zebra-script`, bindgen/libclang) and the later
+lock-discipline rework into the messenger's addon; neither is needed here, so
+the move alone is ported, by the same rule as everything else in this
+directory — byte-identical to the wallet, or it is a bug:
+
+* `native/src/chain_restart.rs` — **copied byte for byte** from `8b73dbc3`
+  (sha256 `7b91df7c…62a0`, its own row in `PROVENANCE-FILES.tsv`). It uses only
+  dependencies the a963fd8c manifest already has, so `Cargo.toml` and
+  `Cargo.lock` are unchanged.
+* `native/src/lib.rs` — **exactly** the four hunks `8b73dbc3` made to the
+  wallet's `lib.rs` for the move, and nothing else: `mod chain_restart;`, the
+  `move_wallet_to_restarted_chain` export, the new-wallet birthday in
+  `init_new` (tip less 100 on SWARM Mainnet, via
+  `chain_restart::new_wallet_birthday`), and the
+  `move_wallet_to_restarted_chain` entry point. The added and removed lines of
+  `git diff` here are line-for-line those of `git show 8b73dbc3 --
+  native/src/lib.rs` (checked when the port was made). The table keeps lib.rs's
+  hash **as copied at a963fd8c**; `scripts/check-provenance.mjs` takes the four
+  hunks back out, each found exactly once, and hashes what is left against that
+  row, and it hashes the entry point it took out against the wallet's own bytes
+  (sha256 `ae674134…6f3e`).
+
+The SDK revision is unchanged (`c7464d2e`): it carries no SWARM Mainnet genesis
+of its own, and the wallet file stores the chain tag, not the genesis.
